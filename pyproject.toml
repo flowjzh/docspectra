@@ -1,0 +1,72 @@
+[project]
+name = 'docspectra'
+description = 'DocSpectra: schema-driven document parsing — any file in, spectral JSON out'
+readme = 'README.md'
+requires-python = '>=3.10'  # pydantic-ai-slim floor (the pydantic-ai extra)
+license = 'MIT'
+authors = [
+    {name = 'Flow Jiang', email = 'flowjzh@gmail.com'},
+]
+keywords = ['parsing', 'llm', 'extraction', 'json-schema', 'documents']
+classifiers = [
+    'Development Status :: 3 - Alpha',
+    'Intended Audience :: Developers',
+    'Topic :: Software Development :: Libraries :: Python Modules',
+    'Programming Language :: Python :: 3',
+    'Programming Language :: Python :: 3.10',
+    'Programming Language :: Python :: 3.11',
+    'Programming Language :: Python :: 3.12',
+    'Programming Language :: Python :: 3.13',
+    'Programming Language :: Python :: 3 :: Only',
+    'Operating System :: OS Independent',
+    'Typing :: Typed',
+]
+dependencies = [
+    'xtremeparse',
+    'jsonschema>=4.23',
+    'opentelemetry-api>=1.40.0',  # interface-only; spans no-op without a host provider
+]
+dynamic = ["version"]
+
+[project.optional-dependencies]
+pydantic-ai = [
+    'pydantic-ai-slim[openai]>=2.30.0',
+]
+pdf-inspect = [
+    'pdf-inspector',
+    'pypdf',
+]
+anydoc = [
+    'firecrawl-anydoc',
+    'pypdf',
+]
+mineru = [
+    'xtremeflow>=0.4.4',
+    'httpx>=0.27',
+]
+
+[dependency-groups]
+dev = [
+    'pytest>=8.4.2',
+    'pytest-asyncio>=0.24.0',
+    'lxml',  # tests/docx_builder.py (was transitive via python-docx)
+    'docspectra[pydantic-ai]',
+    'docspectra[pdf-inspect]',
+    'docspectra[anydoc]',
+]
+
+[project.urls]
+Homepage = 'https://gitlab.com/flowjzh/docspectra'
+Repository = 'https://gitlab.com/flowjzh/docspectra.git'
+Issues = 'https://gitlab.com/flowjzh/docspectra/-/issues'
+
+[build-system]
+requires = ["hatchling", "uv-dynamic-versioning"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "uv-dynamic-versioning"
+
+[tool.uv.sources]
+xtremeparse = { workspace = true }
+xtremeflow = { workspace = true }
