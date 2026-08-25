@@ -2,8 +2,7 @@
 ``docspectra[anydoc]``, ``docspectra[mineru]``), magic-byte type routing,
 and file-level decline chains: ``DOCSPECTRA_PARSER_CONFIG`` orders each type's
 chain and a provider whose gate fires on a specific file declines, letting the
-next engine take it. Design record: ``apps/cvspectra/docs/parser.md`` in the
-cohirerx monorepo."""
+next engine take it."""
 
 from docspectra.parser.contracts import (Attempt, Declined, FileInput,
                                          ImageAsset, MAX_ASSETS, MAX_ASSET_BYTES,

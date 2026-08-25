@@ -56,9 +56,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = 'https://gitlab.com/flowjzh/docspectra'
-Repository = 'https://gitlab.com/flowjzh/docspectra.git'
-Issues = 'https://gitlab.com/flowjzh/docspectra/-/issues'
+Homepage = 'https://github.com/flowjzh/docspectra'
+Repository = 'https://github.com/flowjzh/docspectra.git'
+Issues = 'https://github.com/flowjzh/docspectra/issues'
 
 [build-system]
 requires = ["hatchling", "uv-dynamic-versioning"]
