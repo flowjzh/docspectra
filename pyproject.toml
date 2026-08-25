@@ -22,7 +22,7 @@ classifiers = [
     'Typing :: Typed',
 ]
 dependencies = [
-    'xtremeparse',
+    'xtremeparse>=0.1.0',
     'jsonschema>=4.23',
     'opentelemetry-api>=1.40.0',  # interface-only; spans no-op without a host provider
 ]
