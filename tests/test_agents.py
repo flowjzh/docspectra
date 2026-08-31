@@ -74,10 +74,12 @@ async def test_usage_reported_through_the_scheduling_boundary(monkeypatch):
     assert result.data == {'name': '张三'}
 
 
-async def test_wire_layout_and_native_output():
+async def test_wire_layout_and_json_object_channel():
     """The wire contract cache reuse depends on: payload alone in the
-    leading system message, private matter in the user message, schema
-    as response_format (tools would displace the prefix)."""
+    leading system message, private matter in the user message, the
+    structured channel as bare json_object — no schema on the wire
+    (json_schema's grammar collapses long-material arrays under a
+    non-thinking decode; the schema rides the prompt instead)."""
     bodies = []
 
     def handler(request):
@@ -91,15 +93,62 @@ async def test_wire_layout_and_native_output():
     model = openai_model('http://stub/v1', 'x', 'm',
                          http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
     runner = PydanticAIRunner(model)
-    await runner.run(instructions='THE CARD', result_schema=ARR_SCHEMA,
+    await runner.run(instructions='THE CARD', result_schema=OBJ_SCHEMA,
                      content='SHARED PAYLOAD', scope='SCOPE')
     body = bodies[0]
-    assert [(m['role'], m['content']) for m in body['messages']] == [
-        ('system', 'SHARED PAYLOAD'), ('user', 'THE CARD\n\n---\nAssigned material:\nSCOPE')]
+    user = body['messages'][1]['content']
+    assert [(m['role']) for m in body['messages']] == ['system', 'user']
+    assert body['messages'][0]['content'] == 'SHARED PAYLOAD'
+    assert user.startswith('THE CARD')
+    assert 'Assigned material:\nSCOPE' in user
+    # the per-call output block: top-level directive + the partial
+    # schema restated beside the payload's full-document schema
+    assert 'the assigned item alone' in user
+    assert json.dumps(OBJ_SCHEMA, ensure_ascii=False) in user
     assert body.get('tools') is None
-    assert body['response_format']['json_schema']['strict'] is True  # schema stays out of the prompt
-    schema = body['response_format']['json_schema']['schema']
-    assert schema['properties']['items'] == ARR_SCHEMA  # array wrapped for native output
+    assert body['response_format'] == {'type': 'json_object'}
+
+    legacy = PydanticAIRunner(model, json_object=False)
+    await legacy.run(instructions='THE CARD', result_schema=ARR_SCHEMA,
+                     content='SHARED PAYLOAD', scope='SCOPE')
+    wire = bodies[1]['response_format']
+    assert wire['json_schema']['strict'] is True
+    assert wire['json_schema']['schema']['properties']['items'] == ARR_SCHEMA
+
+
+async def test_json_object_reply_tolerates_fences_and_wrappers():
+    runner = PydanticAIRunner(capturing_model(
+        '```json\n{"work_experiences": [{"name": "a"}]}\n```', []))
+    result = await runner.run(instructions='card', result_schema=ARR_SCHEMA, content='全文')
+    assert result.data == [{'name': 'a'}]
+
+
+async def test_json_object_reply_wraps_a_per_item_answer_in_an_array():
+    # a per-item call (object schema) whose reply came wrapped in a
+    # one-element array under the unit's name
+    runner = PydanticAIRunner(capturing_model('{"work_experiences": [{"name": "a"}]}', []))
+    result = await runner.run(instructions='card', result_schema=OBJ_SCHEMA, content='全文')
+    assert result.data == {'name': 'a'}
+
+
+async def test_unusable_reply_gets_one_repair_round():
+    seen = []
+
+    def generate(messages, info):
+        seen.append(messages[-1].parts[0].content)
+        return ModelResponse(parts=[TextPart(
+            content='not json' if len(seen) == 1 else '{"name": "ok"}')])
+
+    runner = PydanticAIRunner(FunctionModel(generate))
+    result = await runner.run(instructions='card', result_schema=OBJ_SCHEMA, content='全文')
+    assert result.data == {'name': 'ok'}
+    assert 'not usable JSON' in seen[1]
+
+
+async def test_two_bad_replies_yield_none_data():
+    runner = PydanticAIRunner(capturing_model('still not json', []))
+    result = await runner.run(instructions='card', result_schema=OBJ_SCHEMA, content='全文')
+    assert result.data is None
 
 
 def test_marked_request_marks_leading_system_payload():

@@ -33,21 +33,24 @@ class PydanticAIRunner:
     feedback trail in the user message — a history round already
     carries the card and scope, so the caller passes ``''`` for them
     and only the per-round feedback is fresh. Structured output goes
-    through
-    the provider's native JSON-schema mode — tool-mode definitions
-    serialize ahead of the system message and displace the shared
-    prefix, killing cache reuse across specialists. Array-shaped result
-    schemas are wrapped in an ``items`` object (native output requires
-    an object schema) and unwrapped on the way out. StructuredDict
-    guarantees only a str-keyed dict — deep conformance is the injected
-    validator's job. Sampling defaults to temperature 0 (extraction is
+    through the provider's ``json_object`` channel by default: the
+    schema rides the prompt (the shared payload embeds it) and the
+    wire enforces only valid JSON — dashscope's ``json_schema``
+    grammar under a non-thinking decode collapses long-material
+    arrays into the cheapest valid output (empty arrays, stray
+    fragments), which the adapter-side parse-retry avoids entirely.
+    Fenced replies and a single-key wrapper the model may add are
+    tolerated; only the top-level shape is checked — deep conformance
+    is the injected validator's job. ``json_object=False`` restores
+    the native JSON-schema grammar (``strict_output`` governs it).
+    Sampling defaults to temperature 0 (extraction is
     deterministic-intent); ``model_settings`` overrides any field.
     Actual token usage is reported to the dispatching scheduler via
     xtremeparse's ``report_tokens``. ``tools`` is accepted (frozen
     protocol) but not implemented yet."""
 
     def __init__(self, model: Model, *, model_settings: dict | None = None,
-                 strict_output: bool = True):
+                 strict_output: bool = True, json_object: bool = True):
         self.model = model
         # deterministic-intent extraction: sampling heat off by default
         self.model_settings = {'temperature': 0, **(model_settings or {})}
@@ -56,6 +59,7 @@ class PydanticAIRunner:
         # break the cacheable prefix — hosts whose strict grammar rejects
         # the schema shape turn it off here
         self.strict_output = strict_output
+        self.json_object = json_object
 
     async def run(self, *, instructions: str, result_schema: JSONSchema, content: str,
                   scope: str = None, tools: list = None, history: list = None,
@@ -63,17 +67,55 @@ class PydanticAIRunner:
         if tools:
             raise NotImplementedError('tool-calling is deferred; see design.md §5.1')
         free = result_schema.get('type') == 'string'  # free-text mode: lib parses
-        wrapped = not free and result_schema.get('type') == 'array'
-        schema = _wrap(result_schema) if wrapped else result_schema
-        output_type = str if free else NativeOutput(StructuredDict(schema),
-                                                    strict=self.strict_output)
-        agent = Agent(self.model, output_type=output_type, instructions=content)
-        result = await agent.run(_tail(instructions, scope, feedback),
-                                 message_history=history,
-                                 model_settings=self._model_settings())
-        await report_tokens(result.usage.input_tokens + result.usage.output_tokens)
+        if free:
+            agent = Agent(self.model, output_type=str, instructions=content)
+            return await self._run_once(agent, instructions, scope, feedback, history)
+        if self.json_object:
+            agent = Agent(self.model, output_type=str, instructions=content)
+            return await self._run_json_object(agent, result_schema,
+                                               instructions, scope, feedback, history)
+        wrapped = result_schema.get('type') == 'array'
+        agent = Agent(self.model,
+                      output_type=NativeOutput(StructuredDict(_wrap(result_schema)
+                                                               if wrapped else result_schema),
+                                               strict=self.strict_output),
+                      instructions=content)
+        result = await self._raw_run(agent, _tail(instructions, scope, feedback), history)
         data = result.output.get('items') if wrapped else result.output
         return AgentResult(data=data, history=result.all_messages())
+
+    async def _run_json_object(self, agent, result_schema, instructions, scope,
+                               feedback, history):
+        """One or two passes over the json_object channel: a reply that
+        fails the adapter's shape check gets one repair round carrying
+        the parse error; a still-unusable reply yields None data — the
+        host validator's missing-field issue then routes the call
+        through the normal correction loop."""
+        settings = self._model_settings()
+        settings['extra_body'] = {**(settings.get('extra_body') or {}),
+                                  'response_format': {'type': 'json_object'}}
+        prompt = _tail(instructions, scope, feedback) + _output_block(result_schema)
+        messages = history
+        for _ in range(2):
+            result = await self._raw_run(agent, prompt, messages, settings)
+            if (data := _relay(result.output, result_schema)) is not None:
+                return AgentResult(data=data, history=result.all_messages())
+            prompt = ('Your previous reply was not usable JSON of the requested '
+                      'shape. Reply again with a single JSON value — an object '
+                      'carrying every required key, or an array of such objects — '
+                      'matching the JSON Schema in the context.')
+            messages = result.all_messages()
+        return AgentResult(data=None, history=result.all_messages())
+
+    async def _run_once(self, agent, instructions, scope, feedback, history):
+        result = await self._raw_run(agent, _tail(instructions, scope, feedback), history)
+        return AgentResult(data=result.output, history=result.all_messages())
+
+    async def _raw_run(self, agent, prompt, history, settings=None):
+        result = await agent.run(prompt, message_history=history,
+                                 model_settings=settings or self._model_settings())
+        await report_tokens(result.usage.input_tokens + result.usage.output_tokens)
+        return result
 
     def _model_settings(self):
         settings = dict(self.model_settings)
@@ -199,6 +241,50 @@ def _wrap(schema: JSONSchema) -> JSONSchema:
             'required': ['items'], 'additionalProperties': False}
 
 
+def _relay(text: str, schema: JSONSchema):
+    """A json_object reply → the promised result shape, or None when the
+    text is not usable JSON of that shape. Fenced code blocks and one
+    single-key wrapper the model may add around the value are
+    tolerated; only the top-level shape is checked."""
+    if (obj := _load_json(text)) is None:
+        return None
+    obj = _unwrap(obj, schema)
+    if (isinstance(obj, list) and schema.get('type') == 'object'
+            and len(obj) == 1 and isinstance(obj[0], dict)):
+        obj = obj[0]  # a per-item reply wrapped in a one-element array
+    want = schema.get('type')
+    if isinstance(obj, dict):
+        return obj if want in (None, 'object') and \
+            all(k in obj for k in schema.get('required') or ()) else None
+    if isinstance(obj, list):
+        return obj if want in (None, 'array') else None
+    return obj if want == 'string' else None
+
+
+def _load_json(text: str):
+    s = text.strip()
+    if s.startswith('```'):  # a fenced reply: take the block's body
+        s = s.split('\n', 1)[1] if '\n' in s else s
+        s = s.rsplit('```', 1)[0]
+    try:
+        return json.loads(s)
+    except ValueError:
+        return None
+
+
+def _unwrap(obj, schema: JSONSchema):
+    """Peel single-key wrappers the model may add — a dict that carries
+    none of the schema's required keys and holds one dict/list value."""
+    required = set(schema.get('required') or ())
+    for _ in range(3):
+        if (isinstance(obj, dict) and len(obj) == 1 and not (required & obj.keys())
+                and isinstance((inner := next(iter(obj.values()))), (dict, list))):
+            obj = inner
+        else:
+            return obj
+    return obj
+
+
 def _tail(instructions: str, scope, feedback) -> str:
     parts = [instructions] if instructions else []
     if scope is not None:
@@ -207,3 +293,21 @@ def _tail(instructions: str, scope, feedback) -> str:
         lines = '\n'.join(f'- {i.path}: {i.message}' for i in feedback)
         parts.append(f'\n\n---\nValidation errors to fix:\n{lines}')
     return ''.join(parts)
+
+
+def _output_block(schema: JSONSchema) -> str:
+    """What the json_object channel cannot enforce on the wire: this
+    call's expected shape. The payload's schema shows the whole
+    document, so a per-item call there reads as an array — the
+    directive pins the top level, and the partial schema itself is
+    restated beside it so the model need not locate its subschema
+    inside the shared payload (a full-document shape was measured to
+    override the item expectation entirely)."""
+    if schema.get('type') == 'array':
+        head = ('Output: one JSON array — every item of this unit, '
+                'each an object with all required keys.')
+    else:
+        head = ('Output: one JSON object — the assigned item alone, '
+                'with all required keys.')
+    return (f'\n\n---\n{head}\nOutput schema of this call:\n'
+            + json.dumps(schema, ensure_ascii=False))
