@@ -20,8 +20,8 @@ from xtremeparse.scheduling import report_tokens
 # tool_choice='required' (structured output) while thinking — same quirk
 # argus works around; generalized to any qwen3.x numeric series
 _THINKING_OFF = re.compile(
-    r'^qwen-(plus|flash|turbo)(-.*)?$|'
-    r'^qwen3(\.\d+)?-(omni-flash|vl-plus|flash|plus|\d+b(-a\d+b)?)(-.*)?$')
+    r'^qwen-(plus|flash|turbo|max)(-.*)?$|'
+    r'^qwen3(\.\d+)?-(omni-flash|vl-plus|flash|plus|max|\d+b(-a\d+b)?)(-.*)?$')
 
 
 class PydanticAIRunner:
