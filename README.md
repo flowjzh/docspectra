@@ -17,7 +17,7 @@ file + JSON schema ──► docspectra.parse ──► JSON
 ## Layout
 
 - `docspectra/parser` — file → text (provider engines as optional extras:
-  `pdf-inspect`, `anydoc`, `mineru`; magic-byte type routing;
+  `pdf-inspect`, `anydoc`, `mineru`, `paddleocr`; magic-byte type routing;
   file-level decline chains — a provider whose gate fires on a specific
   file declines and the next engine takes it)
 - `docspectra/agents` — the only PydanticAI boundary (AgentRunner adapter)

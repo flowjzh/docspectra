@@ -23,7 +23,7 @@ from typing import Awaitable, Callable, Sequence
 from docspectra.parser.contracts import Attempt, Declined, ParseResult
 from docspectra.parser.sniff import sniff, validate_declared
 
-_BUILTIN_MODULES = ('txt', 'pdf_inspect', 'anydoc', 'mineru')
+_BUILTIN_MODULES = ('txt', 'pdf_inspect', 'anydoc', 'mineru', 'paddleocr')
 _BUILTIN_NAMES = {m.replace('_', '-') for m in _BUILTIN_MODULES}
 _CONFIG_ENV = 'DOCSPECTRA_PARSER_CONFIG'
 
