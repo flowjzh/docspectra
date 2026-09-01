@@ -13,6 +13,7 @@ from pydantic_ai.models import Model
 from pydantic_ai.output import StructuredDict
 
 from xtremeparse.contracts import AgentResult, Issue, JSONSchema
+from xtremeparse.patching import is_patch_round
 from xtremeparse.scheduling import report_tokens
 
 
@@ -302,8 +303,15 @@ def _output_block(schema: JSONSchema) -> str:
     directive pins the top level, and the partial schema itself is
     restated beside it so the model need not locate its subschema
     inside the shared payload (a full-document shape was measured to
-    override the item expectation entirely)."""
-    if schema.get('type') == 'array':
+    override the item expectation entirely). A patch-or-value anyOf
+    (a correction round) states the diff protocol instead — it must
+    win the prompt tail or the model re-emits the full value."""
+    if is_patch_round(schema):
+        head = ('Output: a JSON Patch (RFC 6902) — an array of {"op", '
+                '"path", "value"} operations applied to your previous '
+                'result — or, when the fix cannot be expressed as a '
+                'patch, the full corrected value.')
+    elif schema.get('type') == 'array':
         head = ('Output: one JSON array — every item of this unit, '
                 'each an object with all required keys.')
     else:
