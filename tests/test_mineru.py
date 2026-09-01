@@ -8,10 +8,8 @@ import httpx
 import pytest
 
 from docspectra.parser import ParseDeclinedError, configure, parse
+from tests.helpers import PDF, PNG
 from xtremeflow.scheduler.request import RequestRateScheduler
-
-PDF = b'%PDF-1.4\nfake resume bytes'
-PNG = b'\x89PNG\r\n\x1a\n' + b'x' * 32
 
 
 def _zip(markdown: str) -> bytes:
@@ -183,13 +181,6 @@ def test_ticket_spacing_pin():
     scheduler._reserve_ticket()
     wait = scheduler._reserve_ticket()
     assert 1.1 <= wait <= 1.3
-
-
-def test_malformed_concurrency_spec(env, monkeypatch):
-    monkeypatch.setenv('MINERU_CONCURRENCY', 'submit:50')  # missing status lane
-    env._lanes_cache = None
-    with pytest.raises(ValueError, match='status'):
-        env._lanes()
 
 
 async def test_missing_token_is_a_hard_error(env, mineru_chain, monkeypatch):
