@@ -17,8 +17,9 @@ def traced(fn):
     registrations and their span names can then never drift apart. The
     span carries the outcome bookkeeping (outcome, decline reason,
     input bytes, the meta diagnostics — never text: spans are an
-    account ledger like the sidecar, PII stays out; batch_id stays off
-    too, it points at remote state holding the file)."""
+    account ledger like the sidecar, PII stays out; meta keys ending
+    in ``_id`` stay off too — by convention they point at remote state
+    holding the file, and the convention keeps new engines covered)."""
     span_name = f'{fn.__module__.rsplit(".", 1)[-1]}.parse'
 
     @wraps(fn)
@@ -35,7 +36,7 @@ def traced(fn):
                 span.set_attribute('parse.chars', len(result.text))
                 span.set_attribute('parse.images', len(result.images))
                 for key, value in result.meta.items():
-                    if key != 'batch_id':
+                    if not key.endswith('_id'):
                         span.set_attribute(f'parse.{key}', value)
             return result
 
