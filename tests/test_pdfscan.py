@@ -4,7 +4,7 @@ geometry-based table detection (parser.md §1). Engine-independent —
 the mangled shapes are strings, so no local engine extra is needed."""
 
 from docspectra.parser import Declined
-from docspectra.providers._pdfscan import scan, table_wall_hit
+from docspectra.providers.pdfscan import scan, table_wall_hit
 from tests.pdf_builder import make_pdf
 
 # max row 602 > WALL_ROW_CHARS, share 1.0 ≥ TABLE_SHARE_MIN — both

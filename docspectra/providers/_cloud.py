@@ -1,6 +1,6 @@
 """Shared plumbing behind the cloud engines — the byte-budget result
 LRU, the dual rate lanes, and the job-poll state machine their flows
-share. Local engines share ``_pdfscan``; cloud ones share this.
+share. Local engines share ``pdfscan``; cloud ones share this.
 Mirroring an engine's flow is fine; copying this file is not."""
 
 from __future__ import annotations

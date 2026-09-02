@@ -1,7 +1,7 @@
 """Local superset engine (extra: anydoc): firecrawl-anydoc (Rust) over
 pdf plus every office family. The pdf branch runs the shared decline
 gates — classify from the engine's own ImageBased/Scanned rejection,
-the rest from ``_pdfscan``; office formats (doc/docx, xls/xlsx, ppt/pptx,
+the rest from ``pdfscan``; office formats (doc/docx, xls/xlsx, ppt/pptx,
 odt/ods/odp, rtf, epub, csv) convert to markdown with their embedded
 images carried as ImageAssets. Docx headers and footers are page
 furniture the engine drops by design."""
@@ -14,7 +14,7 @@ from docspectra.parser import (Declined, ImageAsset, MAX_ASSETS,
                                MAX_ASSET_BYTES, ParseResult, provider,
                                sniff)
 from docspectra.providers import traced
-from docspectra.providers._pdfscan import scan
+from docspectra.providers.pdfscan import scan
 
 # sniff type → engine Format for the office branch; None lets the engine
 # detect from the bytes (the OLE2 family — 'doc' covers legacy doc/xls/ppt

@@ -10,7 +10,7 @@ import pytest
 from pypdf import PdfReader
 
 from docspectra.parser import ParseDeclinedError, configure, parse
-from docspectra.providers._pdfscan import clean, ratio_hit, strip_hit
+from docspectra.providers.pdfscan import clean, ratio_hit, strip_hit
 from tests.pdf_builder import make_pdf, raster_pdf, strip_pdf
 
 CLEAN = make_pdf()

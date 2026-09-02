@@ -1,6 +1,6 @@
 """Local pdf engine (extra: pdf-inspect): pdf-inspector extraction with
 a sampling-classify decline gate (raster pages); the fingerprint/ratio
-gates, image collection, and post-processing live in ``_pdfscan``."""
+gates, image collection, and post-processing live in ``pdfscan``."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import pdf_inspector
 
 from docspectra.parser import Declined, ParseResult, provider
 from docspectra.providers import traced
-from docspectra.providers._pdfscan import scan
+from docspectra.providers.pdfscan import scan
 
 
 @provider('pdf-inspect', ('pdf',))
