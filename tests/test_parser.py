@@ -6,6 +6,7 @@ import json
 import pytest
 
 from docspectra import parser as core
+from docspectra.parser import core as parser_core
 from docspectra.parser import ParseDeclinedError, configure, parse
 from tests.fake_providers import BEHAVIORS
 from tests.helpers import OLE2, PDF, zip_with
@@ -125,6 +126,14 @@ async def test_derived_default_chain_in_registration_order(fakes):
     fakes['fake-b'] = 'decline'
     result = await parse(PDF, name='resume.pdf')  # unconfigured → derived [fake-a, fake-b, fake-c]
     assert result.provider == 'fake-c'
+
+
+async def test_builtin_pdf_chain_ranks_paddleocr_before_mineru(fakes):
+    """Both extras share deps, so import success can't rank them — the
+    builtin order must keep paddleocr ahead of mineru or a paddleocr-only
+    install silently routes scanned pdfs to mineru."""
+    chain = parser_core._chain_for('pdf')
+    assert chain.index('paddleocr') < chain.index('mineru')
 
 
 async def test_zip_routes_docx_xlsx_pptx(fakes):
