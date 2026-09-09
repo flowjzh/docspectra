@@ -96,16 +96,28 @@ def _table(rows: list[list[str]]):
     return tbl
 
 
-def make_docx(*, media: bool = False) -> bytes:
+def make_docx(*, media: bool = False, wall: bool = False) -> bytes:
     """A 1-page docx: body paragraph + text box + 2×2 table, one header
-    line, optionally ``word/media/image1.png`` inline-referenced."""
+    line, optionally ``word/media/image1.png`` inline-referenced.
+    ``wall`` swaps the body for one table swallowing the document — the
+    whole-document-table shape the wall gate exists for."""
     body = etree.Element(_w('body'))
-    body.append(_par('body paragraph one'))
-    body.append(_text_box_par('text box content'))
-    body.append(_table([['cell A1', 'cell A2'], ['cell B1', 'cell B2']]))
-    if media:
-        body.append(_image_par('rIdM'))
+    if wall:
+        body.append(_table([['name', 'value'], ['cell A1', 'x' * 600]]))
+        media = False  # the wall shape ships no media
+    else:
+        body.append(_par('body paragraph one'))
+        body.append(_text_box_par('text box content'))
+        body.append(_table([['cell A1', 'cell A2'], ['cell B1', 'cell B2']]))
+        if media:
+            body.append(_image_par('rIdM'))
     body.append(etree.Element(_w('sectPr')))
+    return _package(body, media=media)
+
+
+def _package(body, *, media: bool) -> bytes:
+    """One body around the fixed packaging: header part, content types,
+    rels, and the optionally media-bearing zip."""
     document = etree.Element(_w('document'), nsmap=NSMAP)
     document.append(body)
     xml = etree.tostring(document, xml_declaration=True, encoding='UTF-8', standalone=True)

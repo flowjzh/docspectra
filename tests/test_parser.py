@@ -6,8 +6,8 @@ import json
 import pytest
 
 from docspectra import parser as core
-from docspectra.parser import core as parser_core
 from docspectra.parser import ParseDeclinedError, configure, parse
+from docspectra.parser.core import _chain_for
 from tests.fake_providers import BEHAVIORS
 from tests.helpers import OLE2, PDF, zip_with
 
@@ -132,7 +132,7 @@ async def test_builtin_pdf_chain_ranks_paddleocr_before_mineru(fakes):
     """Both extras share deps, so import success can't rank them — the
     builtin order must keep paddleocr ahead of mineru or a paddleocr-only
     install silently routes scanned pdfs to mineru."""
-    chain = parser_core._chain_for('pdf')
+    chain = _chain_for('pdf')
     assert chain.index('paddleocr') < chain.index('mineru')
 
 

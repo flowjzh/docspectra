@@ -107,6 +107,13 @@ async def test_upload_poll_zip_flow(env, patch_client, mineru_chain):
     assert asset.source == 'mineru images/a.png'
 
 
+async def test_html_table_markdown_flattens_in_transit(env, patch_client, mineru_chain):
+    # full.md's HTML table blocks flatten to line text at the boundary
+    patch_client(_Flow(markdown='<table><tr><td><p>cell</p></td></tr></table>'))
+    result = await parse(PDF, name='resume.pdf')
+    assert result.text == 'cell'
+
+
 async def test_quota_rejection_is_a_hard_error(env, patch_client, mineru_chain):
     def handler(request):
         return httpx.Response(402, json={'code': 402, 'msg': 'quota exhausted'})

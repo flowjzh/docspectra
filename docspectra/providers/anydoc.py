@@ -1,10 +1,11 @@
 """Local superset engine (extra: anydoc): firecrawl-anydoc (Rust) over
 pdf plus every office family. The pdf branch runs the shared decline
 gates — classify from the engine's own ImageBased/Scanned rejection,
-the rest from ``pdfscan``; office formats (doc/docx, xls/xlsx, ppt/pptx,
-odt/ods/odp, rtf, epub, csv) convert to markdown with their embedded
-images carried as ImageAssets. Docx headers and footers are page
-furniture the engine drops by design."""
+the rest from ``pdfscan``; the office branch runs the table wall from
+``_markdown`` (a whole-document Word table declines to the next engine
+in the chain, which reads the file itself) and converts the rest to
+markdown with their embedded images carried as ImageAssets. Docx
+headers and footers are page furniture the engine drops by design."""
 
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ from docspectra.parser import (Declined, ImageAsset, MAX_ASSETS,
                                MAX_ASSET_BYTES, ParseResult, provider,
                                sniff)
 from docspectra.providers import traced
+from docspectra.providers._markdown import table_wall_hit
 from docspectra.providers.pdfscan import scan
 
 # sniff type → engine Format for the office branch; None lets the engine
@@ -49,10 +51,12 @@ def _parse_pdf(data: bytes) -> ParseResult | Declined:
     return scan(data, text)
 
 
-def _parse_office(data: bytes, doc_type: str) -> ParseResult:
+def _parse_office(data: bytes, doc_type: str) -> ParseResult | Declined:
     # signature-less formats (csv) must name their format explicitly
     fmt = _FORMAT[doc_type]
     text = anydoc.to_markdown_bytes(data, fmt)
+    if table_wall_hit(text):
+        return Declined('table_wall_gate')
     images, skipped = [], 0
     for asset in anydoc.to_document(data, fmt).assets:
         if len(images) >= MAX_ASSETS or len(asset.data) > MAX_ASSET_BYTES:

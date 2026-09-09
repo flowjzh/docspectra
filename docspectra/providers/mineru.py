@@ -4,7 +4,8 @@ upload + batch poll, rate-limited by dual xtremeflow lanes (submit
 divided by 60 into float rps). 429/5xx raise RetryException and retry
 through auto_backoff; other 4xx (quota, auth) surface as hard errors.
 Results are cached via the shared ``_cloud`` LRU — memory only,
-never disk."""
+never disk. full.md's HTML table blocks flatten to line text at the
+boundary (``_markdown``)."""
 
 from __future__ import annotations
 
@@ -19,6 +20,7 @@ from docspectra.parser import (ImageAsset, MAX_ASSETS, MAX_ASSET_BYTES,
                                ParseResult, provider)
 from docspectra.providers import traced
 from docspectra.providers._cloud import ResultCache, lanes, mime_for_ext, poll_until
+from docspectra.providers._markdown import flatten_tables
 
 from xtremeflow.scheduler.rate_limit import RetryException, auto_backoff
 from xtremeflow.scheduler.request import RequestRateScheduler  # deep import: not re-exported
@@ -55,7 +57,7 @@ async def parse_mineru(data: bytes, *, name: str | None = None) -> ParseResult:
         result_zip = await _download(client, zip_url)
         markdown, images, skipped = _unzip(result_zip)
     result = ParseResult(
-        text=markdown, images=images,
+        text=flatten_tables(markdown), images=images,
         meta={'model_version': model, 'batch_id': batch_id, 'skipped_assets': skipped})
     _cache.put(key, result)
     return result

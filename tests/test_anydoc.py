@@ -11,6 +11,7 @@ from tests.pdf_builder import make_pdf, raster_pdf, strip_pdf
 
 CLEAN = make_docx()  # text box + table + header, no media
 MEDIA = make_docx(media=True)  # + word/media/image1.png, inline-referenced
+WALL = make_docx(wall=True)  # trips table_wall_gate
 RASTER = raster_pdf()
 STRIP = strip_pdf()
 
@@ -69,6 +70,15 @@ async def test_clean_pdf_parses(anydoc_chain):
     result = await parse(make_pdf(), name='resume.pdf')
     assert result.provider == 'anydoc'
     assert 'sample line 001' in result.text
+
+
+async def test_whole_document_table_declines_table_wall_gate(anydoc_chain):
+    # one Word table swallowing the document — the legacy-template class
+    # the office engine flattens into unreadable pipe rows — leaves to
+    # the next engine in the chain, which reads the file itself
+    with pytest.raises(ParseDeclinedError) as exc:
+        await parse(WALL, name='resume.docx')
+    assert exc.value.attempts[0].reason == 'table_wall_gate'
 
 
 async def test_csv_names_its_format(anydoc_chain):

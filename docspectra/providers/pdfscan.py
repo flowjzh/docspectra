@@ -1,9 +1,9 @@
 """Shared plumbing behind the local pdf engines (pdf-inspect and anydoc):
-the post-classify tail — two byte-side decline gates over pypdf (the
-word-strip fingerprint and the content-stream ratio) plus one text-side
-gate over the engine markdown (the table wall), the XObject image
-collection, and the markdown clean-up — pure pypdf plus regex, so either
-extra can host it without the other's engine."""
+the ``scan()`` tail runs the two byte-side decline gates over pypdf (the
+word-strip fingerprint and the content-stream ratio), the shared wall
+gate (predicate in ``_markdown``, engine markdown not pypdf), the
+XObject image collection, and the markdown clean-up — pypdf plus regex
+so either extra can host it without the other's engine."""
 
 from __future__ import annotations
 
@@ -14,13 +14,10 @@ from pypdf import PdfReader
 
 from docspectra.parser import (Declined, ImageAsset, MAX_ASSETS,
                                MAX_ASSET_BYTES, ParseResult)
+from docspectra.providers._markdown import table_wall_hit
 
 RATIO_THRESHOLD = 200  # B/char; measured 4,968 vs clean max 82 (parser.md §1)
 STRIP_W, STRIP_H = 80, 100  # pixel dims of word-shaped raster strips
-TABLE_SHARE_MIN = 0.7  # of all text chars; judgment call — measured wall
-# 0.99, corpus real tables a minority share (parser.md §1)
-WALL_ROW_CHARS = 500  # chars in one row; the engine's own paragraph-wall
-# constant, measured wall row ~1,300 (parser.md §1)
 _MIME = {'/DCTDecode': 'image/jpeg', '/JPXDecode': 'image/jp2',
          '/CCITTFaxDecode': 'image/tiff'}
 
@@ -49,22 +46,6 @@ def scan(data: bytes, text: str, **meta) -> ParseResult | Declined:
 
 def clean(markdown: str) -> str:
     return _BULLET.sub('• ', _U_TAG.sub('', markdown))
-
-
-def table_wall_hit(text: str) -> bool:
-    """One markdown table swallowing the page's flowing prose — the
-    layout-band false positive of geometry-based table detection (a
-    borderless template frame reconstructed as a grid, reading order
-    scrambled). Both conditions matter: a document that merely carries
-    a real table stays, and a page of genuine data cells (high table
-    share, short rows) stays."""
-    lines = [line for line in text.splitlines() if line.strip()]
-    rows = [line for line in lines
-            if line.startswith('|') and line.strip('|- ')]
-    total = sum(map(len, lines))
-    return (bool(rows)
-            and sum(map(len, rows)) / total >= TABLE_SHARE_MIN
-            and max(map(len, rows)) > WALL_ROW_CHARS)
 
 
 def strip_hit(page) -> bool:
