@@ -13,7 +13,7 @@ from pydantic_ai.models import Model
 from pydantic_ai.output import StructuredDict
 
 from xtremeparse.contracts import AgentResult, Issue, JSONSchema
-from xtremeparse.patching import is_patch_round
+from xtremeparse.patching import PATCH_NO_FIX, is_patch_round
 from xtremeparse.scheduling import report_tokens
 
 
@@ -310,7 +310,8 @@ def _output_block(schema: JSONSchema) -> str:
         head = ('Output: a JSON Patch (RFC 6902) — an array of {"op", '
                 '"path", "value"} operations applied to your previous '
                 'result — or, when the fix cannot be expressed as a '
-                'patch, the full corrected value.')
+                'patch, the full corrected value. Reply with '
+                + PATCH_NO_FIX + '.')
     elif schema.get('type') == 'array':
         head = ('Output: one JSON array — every item of this unit, '
                 'each an object with all required keys.')
