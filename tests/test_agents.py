@@ -155,18 +155,31 @@ def test_marked_request_marks_leading_system_payload():
     body = {'model': 'm', 'messages': [
         {'role': 'system', 'content': 'SHARED PAYLOAD'},
         {'role': 'user', 'content': 'THE CARD'}]}
-    request = marked_request(_request(body))
-    marked = json.loads(request.read().decode())['messages'][0]
-    assert marked['content'] == [{'type': 'text', 'text': 'SHARED PAYLOAD',
-                                  'cache_control': {'type': 'ephemeral'}}]
-    assert request.headers['content-length'] == str(len(request.content))
+    assert marked_request(body) is True
+    assert body['messages'][0]['content'] == [
+        {'type': 'text', 'text': 'SHARED PAYLOAD',
+         'cache_control': {'type': 'ephemeral'}}]
+
+
+def test_marked_request_marks_the_shared_prefix_user_message_too():
+    body = {'model': 'm', 'messages': [
+        {'role': 'system', 'content': 'SHARED PAYLOAD'},
+        {'role': 'user', 'content': 'SEGMENTS'},
+        {'role': 'assistant', 'content': '0-9 a.0'},
+        {'role': 'user', 'content': 'repair feedback'}]}
+    assert marked_request(body) is True
+    messages = body['messages']
+    assert [m['content'][0]['text'] for m in messages[:2]] == ['SHARED PAYLOAD', 'SEGMENTS']
+    assert all(m['content'][0]['cache_control'] == {'type': 'ephemeral'} for m in messages[:2])
+    assert messages[2]['content'] == '0-9 a.0'
+    assert messages[3]['content'] == 'repair feedback'
 
 
 def test_marked_request_passes_other_shapes_through():
     for messages in ([{'role': 'user', 'content': 'hi'}],
                      [{'role': 'system', 'content': [{'type': 'text', 'text': 'already blocks'}]}]):
-        request = _request({'model': 'm', 'messages': messages})
-        assert marked_request(request) is request
+        body = {'model': 'm', 'messages': messages}
+        assert marked_request(body) is False
 
 
 def test_rename_cache_write_relabels_dashscope_usage_field():
@@ -182,8 +195,3 @@ def test_rename_cache_write_relabels_dashscope_usage_field():
 def test_rename_cache_write_passes_plain_usage_through():
     response = _rename_cache_write(httpx.Response(200, json={'usage': {'prompt_tokens': 5}}))
     assert json.loads(response.content.decode())['usage'] == {'prompt_tokens': 5}
-
-
-def _request(body):
-    return httpx.Request('POST', 'http://x/v1/chat/completions',
-                         json=body, headers={'authorization': 'Bearer k'})

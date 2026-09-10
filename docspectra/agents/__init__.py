@@ -35,7 +35,7 @@ class PydanticAIRunner:
     carries the card and scope, so the caller passes ``''`` for them
     and only the per-round feedback is fresh. Structured output goes
     through the provider's ``json_object`` channel by default: the
-    schema rides the prompt (the shared payload embeds it) and the
+    schema rides the prompt (restated per call) and the
     wire enforces only valid JSON — dashscope's ``json_schema``
     grammar under a non-thinking decode collapses long-material
     arrays into the cheapest valid output (empty arrays, stray
@@ -145,30 +145,36 @@ def _stripped_headers(headers: httpx.Headers) -> httpx.Headers:
     return headers
 
 
-def marked_request(request: httpx.Request) -> httpx.Request:
-    """Rewrite a chat-completions request so its leading string-content
-    system message becomes a cache-marked content block (dashscope's
-    ``cache_control`` explicit-cache extension). The marker must close
-    the shared payload at a message boundary — marking mid-message does
-    not match. Non-matching shapes pass through untouched."""
-    body = json.loads(request.read())
+def marked_request(body: dict) -> bool:
+    """Mark the first two string-content messages of a parsed
+    chat-completions body — the shared payload and the shared-prefix
+    user message — as dashscope explicit-cache blocks (``cache_control``
+    extension). Two boundaries, not one: correction and repair rounds
+    re-dispatch with the conversation appended, and only a marker
+    closed before the appended tail lets that whole prefix hit
+    (measured on dashscope: a router repair round reads ~91% cached
+    with both marked, ~40% with system alone). A shorter request never
+    matches a longer block, so the second marker costs a one-off
+    creation premium and pays on the first re-dispatch. The marker must
+    close the shared payload at a message boundary — marking
+    mid-message does not match. Returns whether the body changed;
+    shapes without a leading string-content system message pass
+    through."""
     messages = body.get('messages')
-    if (messages and messages[0].get('role') == 'system'
+    if not (messages and messages[0].get('role') == 'system'
             and isinstance(messages[0].get('content'), str)):
-        messages[0]['content'] = [{'type': 'text', 'text': messages[0]['content'],
-                                   'cache_control': {'type': 'ephemeral'}}]
-        return httpx.Request(request.method, request.url,
-                             headers=_stripped_headers(request.headers),
-                             content=_json_body(body))
-    return request
+        return False
+    for m in messages[:2]:
+        if isinstance(m.get('content'), str):
+            m['content'] = [{'type': 'text', 'text': m['content'],
+                             'cache_control': {'type': 'ephemeral'}}]
+    return True
 
 
-def _unthinking(request: httpx.Request) -> httpx.Request:
+def _unthinking(body: dict) -> bool:
     """Drops ``enable_thinking: false`` into a chat-completions body."""
-    body = json.loads(request.read())
-    return httpx.Request(request.method, request.url,
-                         headers=_stripped_headers(request.headers),
-                         content=_json_body(body | {'enable_thinking': False}))
+    body['enable_thinking'] = False
+    return True
 
 
 def _rename_cache_write(response: httpx.Response) -> httpx.Response:
@@ -188,22 +194,28 @@ def _rename_cache_write(response: httpx.Response) -> httpx.Response:
 class _WireTransport(httpx.AsyncHTTPTransport):
     """Applies provider wire transforms — requests before they leave,
     chat-completion responses as they return; the openai client beneath
-    is untouched."""
+    is untouched. The body is parsed once for all transforms and
+    re-serialized once after them (the transforms mutate the parsed
+    body in place); an untouched body rides the original request."""
 
     def __init__(self, transforms: list):
         super().__init__()  # the base owns the connection pool
         self.transforms = transforms
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith('/chat/completions'):
-            for transform in self.transforms:
-                request = transform(request)
-            response = await super().handle_async_request(request)
-            if 'application/json' in response.headers.get('content-type', ''):
-                await response.aread()  # a rewritable body must be read first
-                return _rename_cache_write(response)
-            return response
-        return await super().handle_async_request(request)
+        if not request.url.path.endswith('/chat/completions'):
+            return await super().handle_async_request(request)
+        body = json.loads(request.read())
+        changed = [transform(body) for transform in self.transforms]
+        if any(changed):
+            request = httpx.Request(request.method, request.url,
+                                    headers=_stripped_headers(request.headers),
+                                    content=_json_body(body))
+        response = await super().handle_async_request(request)
+        if 'application/json' in response.headers.get('content-type', ''):
+            await response.aread()  # a rewritable body must be read first
+            return _rename_cache_write(response)
+        return response
 
 
 def openai_model(base_url: str, api_key: str, model: str, *, explicit_cache: bool = False,
@@ -212,10 +224,11 @@ def openai_model(base_url: str, api_key: str, model: str, *, explicit_cache: boo
     """A pydantic-ai Model for any OpenAI-compatible endpoint — the
     provider mechanism lives inside the agents boundary; hosts pass
     only deployment config. Requires the ``docspectra[pydantic-ai]`` extra.
-    ``explicit_cache`` marks the leading system message as a provider
-    cache block (dashscope explicit cache): paired with a runner that
-    puts the shared payload in Agent instructions, the call that runs
-    first pays cache creation once and every call behind it hits; the
+    ``explicit_cache`` marks the first two string-content messages as
+    provider cache blocks (dashscope explicit cache): paired with a
+    runner that puts the shared payload in Agent instructions, the call
+    that runs first pays cache creation once and every call behind it
+    hits; the
     wire transport relabels dashscope's non-standard cache-write usage
     field so the count also lands on the span. Providers that reject
     the extension must leave it off.
@@ -298,12 +311,11 @@ def _tail(instructions: str, scope, feedback) -> str:
 
 def _output_block(schema: JSONSchema) -> str:
     """What the json_object channel cannot enforce on the wire: this
-    call's expected shape. The payload's schema shows the whole
-    document, so a per-item call there reads as an array — the
-    directive pins the top level, and the partial schema itself is
-    restated beside it so the model need not locate its subschema
-    inside the shared payload (a full-document shape was measured to
-    override the item expectation entirely). A patch-or-value anyOf
+    call's expected shape. The restatement is the only schema a call
+    sees — the shared payload is the document text alone — so the
+    directive pins the top level, and the partial schema rides beside
+    it (a full-document shape was measured to override the item
+    expectation entirely). A patch-or-value anyOf
     (a correction round) states the diff protocol instead — it must
     win the prompt tail or the model re-emits the full value."""
     if is_patch_round(schema):
