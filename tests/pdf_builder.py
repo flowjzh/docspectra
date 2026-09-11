@@ -9,12 +9,24 @@ from __future__ import annotations
 import io
 import zlib
 
-from pypdf import PdfWriter
+from pypdf import PdfReader, PdfWriter
 from pypdf.generic import ArrayObject, DictionaryObject, NameObject, NumberObject, StreamObject
 
 _FONT = DictionaryObject({NameObject('/Type'): NameObject('/Font'),
                           NameObject('/Subtype'): NameObject('/Type1'),
                           NameObject('/BaseFont'): NameObject('/Helvetica')})
+
+
+def sample_line(i: int) -> str:
+    """The content line make_pdf() draws — single home for the literal
+    the layout-gate fixtures must match byte-for-byte."""
+    return f'sample line {i:03d} of text'
+
+
+def reader(pdf: bytes) -> PdfReader:
+    """The parsed view of a builder's bytes — every test that walks
+    synthetic pdf objects through pypdf reads through here."""
+    return PdfReader(io.BytesIO(pdf))
 
 
 def make_pdf(*, text_lines: int = 25, image: tuple[int, int] | None = None,
@@ -43,7 +55,7 @@ def make_pdf(*, text_lines: int = 25, image: tuple[int, int] | None = None,
         x, y, rw, rh = image_rect
         content += f'q {x} {y} {rw} {rh} re W n /Im1 Do Q\n'.encode()
     for i in range(1, text_lines + 1):
-        content += f'BT /F1 12 Tf 50 {792 - i * 30} Td (sample line {i:03d} of text) Tj ET\n'.encode()
+        content += f'BT /F1 12 Tf 50 {792 - i * 30} Td ({sample_line(i)}) Tj ET\n'.encode()
     for i in range(path_ops):
         content += f'50 {742 - i % 600} m 550 {742 - i % 600} l S\n'.encode()
     resources[NameObject('/Font')] = DictionaryObject(

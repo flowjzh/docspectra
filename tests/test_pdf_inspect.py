@@ -4,14 +4,11 @@ Synthetic PDFs exercise what is synthesizable; the three gate routing
 proofs (fingerprint, ratio, classify) assert in the S16 real-chain
 eval."""
 
-import io
-
 import pytest
-from pypdf import PdfReader
 
 from docspectra.parser import ParseDeclinedError, configure, parse
 from docspectra.providers.pdfscan import clean, ratio_hit, strip_hit
-from tests.pdf_builder import make_pdf, raster_pdf, strip_pdf
+from tests.pdf_builder import make_pdf, raster_pdf, reader, sample_line, strip_pdf
 
 CLEAN = make_pdf()
 RASTER = raster_pdf()
@@ -31,7 +28,7 @@ def pdf_chain():
 async def test_clean_text_pdf_parses(pdf_chain):
     result = await parse(CLEAN, name='resume.pdf')
     assert result.provider == 'pdf-inspect'
-    assert 'sample line 001' in result.text
+    assert sample_line(1) in result.text
     assert result.meta['pages'] == 1
     assert result.meta['pdf_type'] == 'text_based'
     assert result.meta['encoding_issues'] is False
@@ -51,25 +48,22 @@ async def test_word_strip_declines_fingerprint_gate(pdf_chain):
 
 
 async def test_fingerprint_dimensions(pdf_chain):
-    reader = PdfReader(io.BytesIO(STRIP))
-    assert strip_hit(reader.pages[0])
-    reader = PdfReader(io.BytesIO(HEADSHOT))  # tall portrait image passes
-    assert not strip_hit(reader.pages[0])
-    reader = PdfReader(io.BytesIO(CLEAN))
-    assert not strip_hit(reader.pages[0])
+    assert strip_hit(reader(STRIP).pages[0])
+    assert not strip_hit(reader(HEADSHOT).pages[0])  # tall portrait image passes
+    assert not strip_hit(reader(CLEAN).pages[0])
 
 
 def test_ratio_gate_direct():
-    ratio_text = len('sample line 001 of text')  # the single text line
-    assert ratio_hit(PdfReader(io.BytesIO(RATIO)), ratio_text) >= 200
-    clean_text = len('sample line 001 of text') * 25
-    assert ratio_hit(PdfReader(io.BytesIO(CLEAN)), clean_text) < 200
+    ratio_text = len(sample_line(1))  # the single text line
+    assert ratio_hit(reader(RATIO), ratio_text) >= 200
+    clean_text = len(sample_line(1)) * 25
+    assert ratio_hit(reader(CLEAN), clean_text) < 200
 
 
 def test_ratio_merges_multi_part_content_stream():
     pdf = make_pdf(text_lines=1, path_ops=400, stream_parts=2)
-    nchars = len('sample line 001 of text')
-    assert ratio_hit(PdfReader(io.BytesIO(pdf)), nchars) >= 200  # both parts counted
+    nchars = len(sample_line(1))
+    assert ratio_hit(reader(pdf), nchars) >= 200  # both parts counted
 
 
 def test_post_processing_strips_u_and_restores_bullets():

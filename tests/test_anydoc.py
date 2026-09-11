@@ -7,7 +7,7 @@ import pytest
 
 from docspectra.parser import ParseDeclinedError, configure, parse
 from tests.docx_builder import make_docx
-from tests.pdf_builder import make_pdf, raster_pdf, strip_pdf
+from tests.pdf_builder import make_pdf, raster_pdf, sample_line, strip_pdf
 
 CLEAN = make_docx()  # text box + table + header, no media
 MEDIA = make_docx(media=True)  # + word/media/image1.png, inline-referenced
@@ -69,7 +69,7 @@ async def test_word_strip_declines_fingerprint_gate(anydoc_chain):
 async def test_clean_pdf_parses(anydoc_chain):
     result = await parse(make_pdf(), name='resume.pdf')
     assert result.provider == 'anydoc'
-    assert 'sample line 001' in result.text
+    assert sample_line(1) in result.text
 
 
 async def test_whole_document_table_declines_table_wall_gate(anydoc_chain):
