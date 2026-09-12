@@ -1,6 +1,7 @@
 """The paddleocr cloud engine over direct httpx — submit→poll→result
-flow, markdown_ignore_labels knob, rate lanes, retry, LRU — the wire
-client faked, zero network."""
+flow, input-type model split, ocr-line geometry order,
+markdown_ignore_labels knob, rate lanes, retry, LRU — the wire client
+faked, zero network."""
 
 import json
 
@@ -8,7 +9,8 @@ import httpx
 import pytest
 
 from docspectra.parser import ParseDeclinedError, configure, parse
-from docspectra.providers.paddleocr import _options as paddle_options
+from docspectra.providers.paddleocr import (_options as paddle_options,
+                                            _reading_order)
 
 from tests.helpers import PDF, PNG
 
@@ -17,12 +19,14 @@ ASSET_URL = 'https://cdn.example/x.png'
 
 
 def _line(markdown: str | None = None, images: dict | None = None,
-          recs: list | None = None) -> dict:
+          recs: list | None = None, boxes: list | None = None) -> dict:
     """One jsonl line — an ocrResults entry for recs, a
     layoutParsingResults entry for markdown/images."""
     if recs is not None:
-        return {'result': {'ocrResults': [
-            {'prunedResult': {'rec_texts': recs}}]}}
+        pruned = {'rec_texts': recs}
+        if boxes is not None:
+            pruned['rec_boxes'] = boxes
+        return {'result': {'ocrResults': [{'prunedResult': pruned}]}}
     return {'result': {'layoutParsingResults': [
         {'markdown': {'text': markdown, 'images': images or {}}},
     ]}}
@@ -114,8 +118,11 @@ def install_client(monkeypatch):
 
 @pytest.fixture
 def env(monkeypatch):
-    """Test token and a clean LRU; install_client fakes the wire."""
+    """Test token, no ambient model overrides, clean LRU;
+    install_client fakes the wire."""
     monkeypatch.setenv('PADDLEOCR_API_TOKEN', 'test-token')
+    monkeypatch.delenv('PADDLEOCR_MODEL', raising=False)
+    monkeypatch.delenv('PADDLEOCR_IMAGE_MODEL', raising=False)
     from docspectra.providers import paddleocr
     paddleocr._cache.clear()
     yield paddleocr
@@ -124,7 +131,7 @@ def env(monkeypatch):
 
 @pytest.fixture
 def paddle_chain():
-    configure({'pdf': ['paddleocr']})
+    configure({'pdf': ['paddleocr'], 'png': ['paddleocr']})
     yield
     configure(None)
 
@@ -132,33 +139,34 @@ def paddle_chain():
 async def test_submit_poll_wait_flow(env, install_client, paddle_chain):
     fake = _FakeClient([_line(recs=['姓名 张三', '工作经历'])])
     install_client(fake)
-    result = await parse(PDF, name='resume.pdf')
+    result = await parse(PNG, name='resume.png')
     assert result.provider == 'paddleocr'
     assert result.text == '姓名 张三\n工作经历'
     assert result.meta['job_id'] == 'j1'
     assert result.meta['model'] == 'PP-OCRv6'
     post = fake.submits[0]
     assert post['data']['model'] == 'PP-OCRv6'
-    assert json.loads(post['data']['optionalPayload']) == {
-        'useDocOrientationClassify': False, 'useDocUnwarping': False,
-        'useTextlineOrientation': False, 'textDetLimitSideLen': 4000,
-        'textDetLimitType': 'max'}
-    assert post['files']['file'][0] == 'resume.pdf'
-    assert post['files']['file'][1] == PDF
+    assert json.loads(post['data']['optionalPayload']) == paddle_options('PP-OCRv6')
+    assert post['files']['file'][0] == 'resume.png'
+    assert post['files']['file'][1] == PNG
     assert result.images == []
 
 
-async def test_document_flow_wants_the_full_markdown(env, install_client,
-                                                     paddle_chain, monkeypatch):
-    monkeypatch.setenv('PADDLEOCR_MODEL', 'PP-StructureV3')
-    fake = _FakeClient([_line('## name\n\nbody', images={'imgs/a.png': ASSET_URL})])
+async def test_pdf_defaults_to_the_doc_model(env, install_client, paddle_chain):
+    fake = _FakeClient([_line('## name\n\nbody')])
     install_client(fake)
     result = await parse(PDF, name='resume.pdf')
     post = fake.submits[0]
     assert post['data']['model'] == 'PP-StructureV3'
-    assert json.loads(post['data']['optionalPayload']) == {
-        'useDocOrientationClassify': False, 'useDocUnwarping': False,
-        'markdownIgnoreLabels': [], 'useChartRecognition': False}
+    assert result.meta['model'] == 'PP-StructureV3'
+    assert json.loads(post['data']['optionalPayload']) == paddle_options('PP-StructureV3')
+
+
+async def test_document_flow_wants_the_full_markdown(env, install_client,
+                                                     paddle_chain):
+    fake = _FakeClient([_line('## name\n\nbody', images={'imgs/a.png': ASSET_URL})])
+    install_client(fake)
+    result = await parse(PDF, name='resume.pdf')
     assert '## name' in result.text
     assert len(result.images) == 1
     asset = result.images[0]
@@ -179,17 +187,14 @@ def test_options_per_model():
         'textDetLimitType': 'max'}
 
 
-async def test_pages_join_in_order(env, install_client, paddle_chain, monkeypatch):
-    monkeypatch.setenv('PADDLEOCR_MODEL', 'PP-StructureV3')
+async def test_pages_join_in_order(env, install_client, paddle_chain):
     fake = _FakeClient([_line('page one'), _line('page two')])
     install_client(fake)
     result = await parse(PDF, name='resume.pdf')
     assert result.text == 'page one\n\npage two'
 
 
-async def test_asset_failure_is_skipped(env, install_client, paddle_chain,
-                                        monkeypatch):
-    monkeypatch.setenv('PADDLEOCR_MODEL', 'PP-StructureV3')
+async def test_asset_failure_is_skipped(env, install_client, paddle_chain):
     fake = _FakeClient([_line('body', images={'imgs/a.png': ASSET_URL})],
                        asset_status=500)
     install_client(fake)
@@ -212,7 +217,7 @@ async def test_rate_limit_is_retried_then_succeeds(env, install_client, paddle_c
     fake = _FakeClient([_line(recs=['recovered text'])],
                        fail_submit=(429, 'slow down'))
     install_client(fake)
-    result = await parse(PDF, name='resume.pdf')
+    result = await parse(PNG, name='resume.png')
     assert result.provider == 'paddleocr'
     assert len(fake.submits) == 2  # 429 then success
     assert 'recovered text' in result.text
@@ -237,12 +242,56 @@ async def test_timeout_is_a_hard_error(env, install_client, paddle_chain, monkey
 async def test_lru_makes_second_call_zero_requests(env, install_client, paddle_chain):
     fake = _FakeClient([_line(recs=['recovered text'])])
     install_client(fake)
-    first = await parse(PDF, name='resume.pdf')
-    second = await parse(PDF, name='resume.pdf')
+    first = await parse(PNG, name='resume.png')
+    second = await parse(PNG, name='resume.png')
     assert second.text == first.text
     assert second.meta['cache_hit'] is True
     assert 'job_id' not in second.meta  # per-call facade, not call 1's meta
     assert len(fake.submits) == 1
+
+
+def test_reading_order_splits_column_streams():
+    # a two-column page in scrambled detection order: the gutter splits
+    # the streams, each reads top-down, left column first
+    boxes = [[430, 300, 1100, 340], [40, 400, 360, 440],
+             [40, 100, 360, 140], [430, 100, 1100, 140]]
+    assert _reading_order(boxes, ['R2', 'L2', 'L1', 'R1']) == ['L1', 'L2', 'R1', 'R2']
+
+
+def test_reading_order_falls_back_to_y_order():
+    # a full-width box crosses every mid-page x-run, so no gutter
+    # qualifies and the geometric order decides
+    boxes = [[100, 300, 1100, 340], [40, 100, 360, 140], [430, 200, 1100, 240]]
+    assert _reading_order(boxes, ['c', 'a', 'b']) == ['a', 'b', 'c']
+
+
+def test_reading_order_without_boxes_keeps_detection_order():
+    assert _reading_order([], ['b', 'a', '']) == ['b', 'a']
+
+
+async def test_model_env_overrides_route_both_ways(env, install_client,
+                                                   paddle_chain, monkeypatch):
+    monkeypatch.setenv('PADDLEOCR_MODEL', 'PP-OCRv6')
+    fake = _FakeClient([_line(recs=['scanned pdf line'])])
+    install_client(fake)
+    result = await parse(PDF, name='resume.pdf')
+    assert fake.submits[0]['data']['model'] == 'PP-OCRv6'
+    assert result.text == 'scanned pdf line'
+
+    monkeypatch.setenv('PADDLEOCR_IMAGE_MODEL', 'PP-StructureV3')
+    fake = _FakeClient([_line('## scanned image')])
+    install_client(fake)
+    result = await parse(PNG, name='resume.png')
+    assert fake.submits[0]['data']['model'] == 'PP-StructureV3'
+    assert result.text == '## scanned image'
+
+
+async def test_ocr_lines_read_in_geometry_order(env, install_client, paddle_chain):
+    boxes = [[430, 100, 1100, 140], [40, 100, 360, 140]]
+    fake = _FakeClient([_line(recs=['R1', 'L1'], boxes=boxes)])
+    install_client(fake)
+    result = await parse(PNG, name='resume.png')
+    assert result.text == 'L1\nR1'
 
 
 async def test_missing_token_is_a_hard_error(env, paddle_chain, monkeypatch):

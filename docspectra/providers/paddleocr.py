@@ -7,8 +7,13 @@ xtremeflow lanes (submit 60/min, status 600/min — the service
 publishes no ceilings; conservative defaults, tunable via
 PADDLEOCR_CONCURRENCY). 429s retry through auto_backoff; other errors
 surface as hard errors. Bytes ride a multipart field; the result
-jsonl and its assets download in memory. Per-model request options
-and their measured rationale live in ``_options``; cache/lanes/poll
+jsonl and its assets download in memory. The model splits by input
+type — PDFs default to the layout-aware PP-StructureV3 (whose reading
+order survives columns and whose markdown leaves figure-embedded
+noise out), raster images to the raw OCR pipeline (PP-OCRv6), whose
+line stream gets a geometry reading order from ``rec_boxes`` (the
+detection order interleaves columns). Per-model request options and
+their measured rationale live in ``_options``; cache/lanes/poll
 plumbing is shared (``_cloud``)."""
 
 from __future__ import annotations
@@ -20,7 +25,7 @@ import os
 import httpx
 
 from docspectra.parser import (ImageAsset, MAX_ASSETS, MAX_ASSET_BYTES,
-                               ParseResult, provider)
+                               ParseResult, provider, sniff)
 from docspectra.providers import traced
 from docspectra.providers._cloud import (ResultCache, lanes, mime_for_ext,
                                          poll_until)
@@ -28,9 +33,24 @@ from docspectra.providers._cloud import (ResultCache, lanes, mime_for_ext,
 from xtremeflow.scheduler.rate_limit import RetryException, auto_backoff
 from xtremeflow.scheduler.request import RequestRateScheduler  # deep import: not re-exported
 
-_OCR_MODEL = 'PP-OCRv6'  # the one ocr-pipeline model; the rest parse documents
+_OCR_MODEL = 'PP-OCRv6'  # image inputs: raw ocr pipeline, geometry-ordered lines
+_DOC_MODEL = 'PP-StructureV3'  # pdf inputs: layout pipeline, engine reading order
 _JOBS = 'https://paddleocr.aistudio-app.com/api/v2/ocr/jobs'
 _AsyncClient = httpx.AsyncClient  # provider-local seam: tests patch this name
+
+# column streams: a zero-crossing gutter (no text box overlaps it) only
+# counts when both sides are substantive — below these a split rests on
+# too little evidence and scrambles single-column pages (parser.md §3)
+GUTTER_MIN_SHARE = 0.25  # of the page's text boxes on each side
+GUTTER_MIN_SPAN = 0.60  # of the page's y-extent covered on each side
+
+
+def _model_for(data: bytes) -> str:
+    """PDFs carry layout the doc pipelines exploit; raster images have
+    no layout to analyze, so they stay on the raw ocr pipeline."""
+    if sniff(data) == 'pdf':
+        return os.environ.get('PADDLEOCR_MODEL', _DOC_MODEL)
+    return os.environ.get('PADDLEOCR_IMAGE_MODEL', _OCR_MODEL)
 
 
 class PaddleOcrError(Exception):
@@ -115,20 +135,78 @@ async def _poll(client: httpx.AsyncClient, token: str, job_id: str, timeout: flo
     return url
 
 
+def _reading_order(boxes: list[list[int]], texts: list[str]) -> list[str]:
+    """One page's recognized lines in visual order. The detection order
+    scans top-down and interleaves columns wherever two columns share a
+    band; boxes enable a column-stream reconstruction — split at a
+    dominant gutter, read each stream top-down, left stream first.
+    Without boxes the detection order is kept as-is; without a dominant
+    gutter, plain geometric order."""
+    if not boxes:
+        return [t for t in texts if t.strip()]
+    items = [(b, t) for b, t in zip(boxes, texts) if t.strip()]
+    return [t for _, t in _streams(items)]
+
+
+def _streams(items: list[tuple]) -> list:
+    if len(items) <= 1:
+        return items
+    if (split := _gutter(items)) is None:
+        return sorted(items, key=lambda it: (it[0][1], it[0][0]))
+    left, right = split
+    return _streams(left) + _streams(right)
+
+
+def _gutter(items: list[tuple]) -> tuple[list, list] | None:
+    """The widest zero-crossing x-run in the middle of the block (real
+    gutters live between columns, not in the margins) that leaves each
+    side with at least GUTTER_MIN_SHARE of the boxes and GUTTER_MIN_SPAN
+    of the y-extent — None when no run qualifies."""
+    width = max(b[2] for b, _ in items)
+    span = max(max(b[3] for b, _ in items) - min(b[1] for b, _ in items), 1)
+
+    def crossed(g: int) -> bool:
+        return any(b[0] < g < b[2] for b, _ in items)
+
+    def side_cover(side: list) -> float:
+        return (max(b[3] for b, _ in side) - min(b[1] for b, _ in side)) / span
+
+    best = None
+    g = int(0.2 * width)
+    while g <= 0.8 * width:
+        if crossed(g):
+            g += 1
+            continue
+        end = g
+        while end + 1 <= 0.8 * width and not crossed(end + 1):
+            end += 1
+        mid = (g + end) / 2
+        left = [it for it in items if (it[0][0] + it[0][2]) / 2 <= mid]
+        right = [it for it in items if (it[0][0] + it[0][2]) / 2 > mid]
+        if (len(left) >= GUTTER_MIN_SHARE * len(items)
+                and len(right) >= GUTTER_MIN_SHARE * len(items)
+                and side_cover(left) >= GUTTER_MIN_SPAN
+                and side_cover(right) >= GUTTER_MIN_SPAN
+                and (best is None or end - g > best[0])):
+            best = (end - g, left, right)
+        g = end + 1
+    return None if best is None else best[1:]
+
+
 async def _collect(model: str, lines: list[dict],
                    client: httpx.AsyncClient) -> tuple[str, list[ImageAsset], int]:
     """Jsonl lines → markdown + ImageAssets; assets reconcile with the
     markdown's ``![](...)`` references by the images dict each page
     ships. The ocr pipeline has no markdown — its recognized lines are
-    the text, and it ships no content images (its images are
-    visualizations)."""
+    the text, geometry-ordered, and it ships no content images (its
+    images are visualizations)."""
     if model == _OCR_MODEL:
         recs = []
         for line in lines:
             for item in (line.get('result') or {}).get('ocrResults') or []:
-                for t in (item.get('prunedResult') or {}).get('rec_texts') or []:
-                    if t := t.strip():
-                        recs.append(t)
+                pr = item.get('prunedResult') or {}
+                recs += _reading_order(pr.get('rec_boxes') or [],
+                                       pr.get('rec_texts') or [])
         if not recs:
             raise PaddleOcrError('paddleocr result has no text lines')
         return '\n'.join(recs), [], 0
@@ -183,7 +261,7 @@ async def parse_paddleocr(data: bytes, *, name: str | None = None) -> ParseResul
     token = os.environ.get('PADDLEOCR_API_TOKEN')
     if not token:
         raise PaddleOcrError('PADDLEOCR_API_TOKEN is not set')
-    model = os.environ.get('PADDLEOCR_MODEL', _OCR_MODEL)
+    model = _model_for(data)
     key = ResultCache.key(data, model)
     if hit := _cache.facade(key, model=model, cache_hit=True):
         return hit
