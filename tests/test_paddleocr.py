@@ -1,15 +1,17 @@
 """The paddleocr cloud engine over direct httpx — submit→poll→result
-flow, input-type model split, ocr-line geometry order,
-markdown_ignore_labels knob, rate lanes, retry, LRU — the wire client
-faked, zero network."""
+flow, input-type model split, ocr-line geometry order, watermark
+stamps, markdown_ignore_labels knob, rate lanes, retry, LRU — the wire
+client faked, zero network."""
 
 import json
+import math
 
 import httpx
 import pytest
 
 from docspectra.parser import ParseDeclinedError, configure, parse
-from docspectra.providers.paddleocr import (_options as paddle_options,
+from docspectra.providers.paddleocr import (_drop_watermarks,
+                                            _options as paddle_options,
                                             _reading_order)
 
 from tests.helpers import PDF, PNG
@@ -19,13 +21,16 @@ ASSET_URL = 'https://cdn.example/x.png'
 
 
 def _line(markdown: str | None = None, images: dict | None = None,
-          recs: list | None = None, boxes: list | None = None) -> dict:
+          recs: list | None = None, boxes: list | None = None,
+          polys: list | None = None) -> dict:
     """One jsonl line — an ocrResults entry for recs, a
     layoutParsingResults entry for markdown/images."""
     if recs is not None:
         pruned = {'rec_texts': recs}
         if boxes is not None:
             pruned['rec_boxes'] = boxes
+        if polys is not None:
+            pruned['rec_polys'] = polys
         return {'result': {'ocrResults': [{'prunedResult': pruned}]}}
     return {'result': {'layoutParsingResults': [
         {'markdown': {'text': markdown, 'images': images or {}}},
@@ -292,6 +297,45 @@ async def test_ocr_lines_read_in_geometry_order(env, install_client, paddle_chai
     install_client(fake)
     result = await parse(PNG, name='resume.png')
     assert result.text == 'L1\nR1'
+
+
+def _poly(x: float, y: float, deg: float) -> list:
+    """One text line's quad: a 200×30 line whose top edge runs from
+    (x, y) at `deg` — the rec_polys wire shape."""
+    dx, dy = 200 * math.cos(math.radians(deg)), 200 * math.sin(math.radians(deg))
+    nx, ny = -30 * math.sin(math.radians(deg)), 30 * math.cos(math.radians(deg))
+    return [[x, y], [x + dx, y + dy], [x + dx + nx, y + dy + ny], [x + nx, y + ny]]
+
+
+def test_watermark_stamps_are_dropped():
+    # the measured bands: body text under 2°, site stamps ~22-27° — a
+    # diagonal line is a stamp whether or not it crosses a body line
+    boxes = [[100, 100, 300, 130], [40, 200, 281, 285], [300, 300, 500, 330]]
+    polys = [_poly(100, 100, 0), _poly(40, 200, 25), _poly(300, 300, 0)]
+    assert _drop_watermarks(boxes, polys, ['body', 'stamp', 'tail']) == (
+        [[100, 100, 300, 130], [300, 300, 500, 330]], ['body', 'tail'])
+
+
+def test_vertical_tabs_and_slight_skew_survive():
+    boxes = [[30, 100, 60, 300], [100, 500, 300, 530]]
+    polys = [_poly(30, 100, 90), _poly(100, 500, 3)]
+    assert _drop_watermarks(boxes, polys, ['tab', 'body']) == (
+        boxes, ['tab', 'body'])
+
+
+def test_without_polys_nothing_is_dropped():
+    boxes, texts = [[0, 0, 10, 10]], ['a']
+    assert _drop_watermarks(boxes, [], texts) == (boxes, texts)
+
+
+async def test_stamp_lines_never_reach_the_text(env, install_client, paddle_chain):
+    fake = _FakeClient([_line(
+        recs=['正文一行', 'Watermark stamp'],
+        boxes=[[40, 100, 360, 140], [430, 300, 708, 390]],
+        polys=[_poly(40, 100, 0), _poly(430, 300, 25)])])
+    install_client(fake)
+    result = await parse(PNG, name='resume.png')
+    assert result.text == '正文一行'
 
 
 async def test_missing_token_is_a_hard_error(env, paddle_chain, monkeypatch):

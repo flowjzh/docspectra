@@ -12,7 +12,8 @@ type — PDFs default to the layout-aware PP-StructureV3 (whose reading
 order survives columns and whose markdown leaves figure-embedded
 noise out), raster images to the raw OCR pipeline (PP-OCRv6), whose
 line stream gets a geometry reading order from ``rec_boxes`` (the
-detection order interleaves columns). Per-model request options and
+detection order interleaves columns) and loses its diagonal watermark
+stamps. Per-model request options and
 their measured rationale live in ``_options``; cache/lanes/poll
 plumbing is shared (``_cloud``)."""
 
@@ -20,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 
 import httpx
@@ -43,6 +45,12 @@ _AsyncClient = httpx.AsyncClient  # provider-local seam: tests patch this name
 # too little evidence and scrambles single-column pages (parser.md §3)
 GUTTER_MIN_SHARE = 0.25  # of the page's text boxes on each side
 GUTTER_MIN_SPAN = 0.60  # of the page's y-extent covered on each side
+
+# watermark stamps: no body text is slanted (measured under 2°) while
+# site stamps ride across the page in a tight diagonal band (~22-27°,
+# n=33) — anything folded into that band is a stamp, overlapping body
+# lines or not (most stamps land in the gaps between them)
+WATERMARK_SLANT_DEG = 15.0  # band is [15°, 75°]; vertical side tabs stay
 
 
 def _model_for(data: bytes) -> str:
@@ -193,20 +201,45 @@ def _gutter(items: list[tuple]) -> tuple[list, list] | None:
     return None if best is None else best[1:]
 
 
+def _slant(poly) -> float | None:
+    """A rec_polygon's text-edge angle folded to [0, 90] — 0 horizontal,
+    90 vertical — None without a usable poly."""
+    try:
+        (x0, y0), (x1, y1) = poly[0][:2], poly[1][:2]
+    except (IndexError, TypeError):
+        return None
+    a = math.degrees(math.atan2(y1 - y0, x1 - x0)) % 180
+    return min(a, 180 - a)
+
+
+def _drop_watermarks(boxes: list, polys: list, texts: list[str]) -> tuple[list, list]:
+    """One page's lines minus diagonal watermark stamps: a line whose
+    polygon lands in the slant band is a site stamp riding over the
+    page, and its oversized box would poison the column geometry too.
+    Near-vertical lines are side tabs, not stamps; without polys there
+    is no angle evidence and nothing is dropped."""
+    stamps = {i for i, p in enumerate(polys)
+              if (a := _slant(p)) is not None
+              and WATERMARK_SLANT_DEG <= a <= 90 - WATERMARK_SLANT_DEG}
+    return ([b for i, b in enumerate(boxes) if i not in stamps],
+            [t for i, t in enumerate(texts) if i not in stamps])
+
+
 async def _collect(model: str, lines: list[dict],
                    client: httpx.AsyncClient) -> tuple[str, list[ImageAsset], int]:
     """Jsonl lines → markdown + ImageAssets; assets reconcile with the
     markdown's ``![](...)`` references by the images dict each page
     ships. The ocr pipeline has no markdown — its recognized lines are
-    the text, geometry-ordered, and it ships no content images (its
-    images are visualizations)."""
+    the text, watermark stamps dropped, geometry-ordered, and it ships
+    no content images (its images are visualizations)."""
     if model == _OCR_MODEL:
         recs = []
         for line in lines:
             for item in (line.get('result') or {}).get('ocrResults') or []:
                 pr = item.get('prunedResult') or {}
-                recs += _reading_order(pr.get('rec_boxes') or [],
-                                       pr.get('rec_texts') or [])
+                recs += _reading_order(*_drop_watermarks(
+                    pr.get('rec_boxes') or [], pr.get('rec_polys') or [],
+                    pr.get('rec_texts') or []))
         if not recs:
             raise PaddleOcrError('paddleocr result has no text lines')
         return '\n'.join(recs), [], 0
