@@ -45,8 +45,9 @@ async def parse_anydoc(data: bytes, *, name: str | None = None) -> ParseResult |
 def _parse_pdf(data: bytes) -> ParseResult | Declined:
     try:
         text = anydoc.to_markdown_bytes(data)
-    except anydoc.UnsupportedError:
-        # the engine's own rejection: ImageBased/Scanned pages need OCR
+    except (anydoc.UnsupportedError, anydoc.NeedsOcrError):
+        # the two engine rejections another chain member can still
+        # serve — the rest of ConvertError is a defect and stays an error
         return Declined('classify_gate')
     return scan(data, text)
 

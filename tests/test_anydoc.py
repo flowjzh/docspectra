@@ -3,6 +3,7 @@ image assets, pdf gate parity, and the legacy .doc family."""
 
 from pathlib import Path
 
+import anydoc
 import pytest
 
 from docspectra.parser import ParseDeclinedError, configure, parse
@@ -57,6 +58,17 @@ async def test_legacy_doc_parses_locally(anydoc_chain):
 async def test_raster_pdf_declines_classify_gate(anydoc_chain):
     with pytest.raises(ParseDeclinedError) as exc:
         await parse(RASTER, name='resume.pdf')
+    assert exc.value.attempts[0].reason == 'classify_gate'
+
+
+async def test_needs_ocr_declines_classify_gate(anydoc_chain, monkeypatch):
+    # a mixed pdf raises the engine's NeedsOcrError; the exact gate
+    # reason proves it declined rather than errored through
+    def needs_ocr(data):
+        raise anydoc.NeedsOcrError('page 2 of 2 needs OCR')
+    monkeypatch.setattr('anydoc.to_markdown_bytes', needs_ocr)
+    with pytest.raises(ParseDeclinedError) as exc:
+        await parse(make_pdf(), name='resume.pdf')
     assert exc.value.attempts[0].reason == 'classify_gate'
 
 
