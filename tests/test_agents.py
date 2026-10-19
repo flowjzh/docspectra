@@ -42,6 +42,24 @@ async def test_array_schema_is_wrapped_and_unwrapped():
     assert result.data == [{'name': 'a'}]
 
 
+def test_thinking_override():
+    """Qwen numeric models default to thinking off for extraction; the
+    judge opts back in with thinking=True (no enable_thinking key), and
+    another model family keeps the provider default."""
+    def fake(messages, info):
+        return ModelResponse(parts=[TextPart(content='{}')])
+
+    qwen = FunctionModel(fake, model_name='qwen3.7-max')
+    off = PydanticAIRunner(qwen)._model_settings()
+    assert off['extra_body'] == {'enable_thinking': False}
+    on = PydanticAIRunner(qwen, thinking=True)._model_settings()
+    assert 'extra_body' not in on
+    forced = PydanticAIRunner(qwen, thinking=False)._model_settings()
+    assert forced['extra_body'] == {'enable_thinking': False}
+    other = PydanticAIRunner(FunctionModel(fake, model_name='gpt-x'))._model_settings()
+    assert 'extra_body' not in other
+
+
 async def test_private_matter_trails_in_the_user_message():
     seen = []
     runner = PydanticAIRunner(capturing_model('{"name": "x"}', seen))

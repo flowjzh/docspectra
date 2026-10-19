@@ -51,7 +51,8 @@ class PydanticAIRunner:
     protocol) but not implemented yet."""
 
     def __init__(self, model: Model, *, model_settings: dict | None = None,
-                 strict_output: bool = True, json_object: bool = True):
+                 strict_output: bool = True, json_object: bool = True,
+                 thinking: bool | None = None):
         self.model = model
         # deterministic-intent extraction: sampling heat off by default
         self.model_settings = {'temperature': 0, **(model_settings or {})}
@@ -61,6 +62,10 @@ class PydanticAIRunner:
         # the schema shape turn it off here
         self.strict_output = strict_output
         self.json_object = json_object
+        # None derives from the model family (qwen numeric models think by
+        # default; extraction switches it off). True leaves the provider
+        # default for consumers that need reasoning, such as the judge.
+        self.thinking = thinking
 
     async def run(self, *, instructions: str, result_schema: JSONSchema, content: str,
                   scope: str = None, tools: list = None, history: list = None,
@@ -120,8 +125,14 @@ class PydanticAIRunner:
 
     def _model_settings(self):
         settings = dict(self.model_settings)
-        if _THINKING_OFF.match(getattr(self.model, 'model_name', '')):
-            settings['extra_body'] = {'enable_thinking': False}
+        thinking = self.thinking
+        if thinking is None:
+            thinking = not _THINKING_OFF.match(
+                getattr(self.model, 'model_name', ''))
+        if not thinking:
+            settings['extra_body'] = {
+                **(settings.get('extra_body') or {}),
+                'enable_thinking': False}
         return settings
 
 
@@ -171,12 +182,6 @@ def marked_request(body: dict) -> bool:
     return True
 
 
-def _unthinking(body: dict) -> bool:
-    """Drops ``enable_thinking: false`` into a chat-completions body."""
-    body['enable_thinking'] = False
-    return True
-
-
 def _rename_cache_write(response: httpx.Response) -> httpx.Response:
     """Relabel dashscope's cache-write usage field to the OpenAI name
     pydantic-ai reads (``prompt_tokens_details.cache_write_tokens``);
@@ -219,7 +224,6 @@ class _WireTransport(httpx.AsyncHTTPTransport):
 
 
 def openai_model(base_url: str, api_key: str, model: str, *, explicit_cache: bool = False,
-                 thinking_off: bool = False,
                  http_client: httpx.AsyncClient | None = None):
     """A pydantic-ai Model for any OpenAI-compatible endpoint — the
     provider mechanism lives inside the agents boundary; hosts pass
@@ -231,20 +235,15 @@ def openai_model(base_url: str, api_key: str, model: str, *, explicit_cache: boo
     hits; the
     wire transport relabels dashscope's non-standard cache-write usage
     field so the count also lands on the span. Providers that reject
-    the extension must leave it off.
-    ``thinking_off`` drops ``enable_thinking: false`` into every request
-    — for consumers that build their own pydantic-ai agents outside the
-    runner's model_settings (pydantic-evals LLMJudge: tools +
-    tool_choice='required', which dashscope rejects while thinking).
-    A host ``http_client`` (proxies, connection tuning) is used
-    verbatim."""
+    the extension must leave it off. A host ``http_client`` (proxies,
+    connection tuning) is used verbatim."""
     try:
         from pydantic_ai.models.openai import OpenAIChatModel
         from pydantic_ai.providers.openai import OpenAIProvider
     except ImportError as e:
         raise ImportError('install the pydantic-ai extra: docspectra[pydantic-ai]') from e
-    if transforms := ([marked_request] if explicit_cache else []) \
-            + ([_unthinking] if thinking_off else []):
+    transforms = [marked_request] if explicit_cache else []
+    if transforms:
         http_client = httpx.AsyncClient(transport=_WireTransport(transforms))
     return OpenAIChatModel(model, provider=OpenAIProvider(
         base_url=base_url, api_key=api_key, http_client=http_client))
