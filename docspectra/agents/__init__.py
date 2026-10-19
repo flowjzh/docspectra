@@ -242,9 +242,9 @@ def openai_model(base_url: str, api_key: str, model: str, *, explicit_cache: boo
         from pydantic_ai.providers.openai import OpenAIProvider
     except ImportError as e:
         raise ImportError('install the pydantic-ai extra: docspectra[pydantic-ai]') from e
-    transforms = [marked_request] if explicit_cache else []
-    if transforms:
-        http_client = httpx.AsyncClient(transport=_WireTransport(transforms))
+    if explicit_cache:
+        http_client = httpx.AsyncClient(
+            transport=_WireTransport([marked_request]))
     return OpenAIChatModel(model, provider=OpenAIProvider(
         base_url=base_url, api_key=api_key, http_client=http_client))
 
