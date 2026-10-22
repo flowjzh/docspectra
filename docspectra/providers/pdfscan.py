@@ -17,11 +17,11 @@ from docspectra.parser import (Declined, ImageAsset, MAX_ASSETS,
                                MAX_ASSET_BYTES, ParseResult)
 from docspectra.providers._markdown import table_wall_hit
 
-RATIO_THRESHOLD = 200  # B/char; measured 4,968 vs clean max 82 (parser.md §1)
+RATIO_THRESHOLD = 200  # B/char; 4,968 vs clean max 82 (parser.md §1)
 STRIP_W, STRIP_H = 80, 100  # pixel dims of word-shaped raster strips
 # reference-line ranks between consecutive emissions
 LAYOUT_LINE_JUMP = 4
-# measured 57% of pairs scrambled vs ≤11% clean, two-column info grids
+# 57% of pairs scrambled vs ≤11% clean, two-column info grids
 # included (parser.md §1)
 LAYOUT_JUMP_FRAC = 0.30
 # fewer aligned pairs and the gate has no opinion — a compensating
@@ -166,7 +166,7 @@ def collect_images(reader: PdfReader) -> tuple[list[ImageAsset], int]:
 
 def _iter_images(page):
     """Yield (key, ImageObject) pairs from the page's own XObject dict —
-    the measured walk behind the fingerprint gate (parser.md §1)."""
+    the walk behind the fingerprint gate (parser.md §1)."""
     resources = _deref(page.get('/Resources') or {})
     for key, ref in _deref(resources.get('/XObject') or {}).items():
         obj = _deref(ref)

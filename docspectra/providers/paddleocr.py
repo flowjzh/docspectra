@@ -14,7 +14,7 @@ noise out), raster images to the raw OCR pipeline (PP-OCRv6), whose
 line stream gets a geometry reading order from ``rec_boxes`` (the
 detection order interleaves columns) and loses its diagonal watermark
 stamps. Per-model request options and
-their measured rationale live in ``_options``; cache/lanes/poll
+their rationale live in ``_options``; cache/lanes/poll
 plumbing is shared (``_cloud``)."""
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ _AsyncClient = httpx.AsyncClient  # provider-local seam: tests patch this name
 GUTTER_MIN_SHARE = 0.25  # of the page's text boxes on each side
 GUTTER_MIN_SPAN = 0.60  # of the page's y-extent covered on each side
 
-# watermark stamps: no body text is slanted (measured under 2°) while
+# watermark stamps: no body text is slanted (under 2°) while
 # site stamps ride across the page in a tight diagonal band (~22-27°,
 # n=33) — anything folded into that band is a stamp, overlapping body
 # lines or not (most stamps land in the gaps between them)
@@ -67,8 +67,8 @@ class PaddleOcrError(Exception):
 
 
 def _options(model: str) -> dict:
-    """Per-model request options, with the measured rationale — the
-    single home for it. Orientation classify and unwarping are off:
+    """Per-model request options, with the rationale — the single home
+    for it. Orientation classify and unwarping are off:
     the server's defaults run them, and unwarping rewrites long
     posters into degraded markdown. The ocr pipeline's detection
     resolution rises to 4000 (the server's own max-side hard cap):

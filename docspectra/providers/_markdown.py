@@ -11,10 +11,10 @@ from __future__ import annotations
 import re
 from html.parser import HTMLParser
 
-TABLE_SHARE_MIN = 0.7  # of all text chars; judgment call — measured wall
-# 0.99, corpus real tables a minority share (parser.md §1)
+TABLE_SHARE_MIN = 0.7  # of all text chars; judgment call — wall 0.99,
+# corpus real tables a minority share (parser.md §1)
 WALL_ROW_CHARS = 500  # chars in one row; the engine's own paragraph-wall
-# constant, measured wall row ~1,300 (parser.md §1)
+# constant, wall row ~1,300 (parser.md §1)
 
 _TABLE = re.compile(r'<table[^>]*>.*?</table>', re.DOTALL)
 

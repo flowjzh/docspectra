@@ -308,7 +308,7 @@ def _poly(x: float, y: float, deg: float) -> list:
 
 
 def test_watermark_stamps_are_dropped():
-    # the measured bands: body text under 2°, site stamps ~22-27° — a
+    # the calibration bands: body text under 2°, site stamps ~22-27° — a
     # diagonal line is a stamp whether or not it crosses a body line
     boxes = [[100, 100, 300, 130], [40, 200, 281, 285], [300, 300, 500, 330]]
     polys = [_poly(100, 100, 0), _poly(40, 200, 25), _poly(300, 300, 0)]
