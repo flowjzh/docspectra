@@ -3,12 +3,14 @@ Swapping agent frameworks means rewriting this module and nothing else."""
 
 from __future__ import annotations
 
+import contextvars
 import json
 import re
 from typing import Sequence
 
 import httpx
 from pydantic_ai import Agent, NativeOutput
+from pydantic_ai.messages import ModelRequest
 from pydantic_ai.models import Model
 from pydantic_ai.output import StructuredDict
 
@@ -23,6 +25,13 @@ from xtremeparse.scheduling import report_tokens
 _THINKING_OFF = re.compile(
     r'^qwen-(plus|flash|turbo|max)(-.*)?$|'
     r'^qwen3(\.\d+)?-(omni-flash|vl-plus|flash|plus|max|\d+b(-a\d+b)?)(-.*)?$')
+
+_DEFAULT_CACHE_BLOCKS = 2  # a history round: system + first user message
+# Per-call cache boundaries: the runner knows how many leading messages are
+# stable (system + prompt_parts), so it marks exactly those; a one-off
+# specialist message must not pay a cache creation premium.
+_CACHE_BLOCKS = contextvars.ContextVar('cache_blocks',
+                                       default=_DEFAULT_CACHE_BLOCKS)
 
 
 class PydanticAIRunner:
@@ -44,6 +53,10 @@ class PydanticAIRunner:
     tolerated; only the top-level shape is checked — deep conformance
     is the injected validator's job. ``json_object=False`` restores
     the native JSON-schema grammar (``strict_output`` governs it).
+    The provider cache marks only the leading stable messages: on a
+    fresh call the system payload plus the caller's ``prompt_parts`` (at
+    most four), so a fresh specialist marks the system payload alone; a
+    history round marks the system plus its first user message.
     Sampling defaults to temperature 0 (extraction is
     deterministic-intent); ``model_settings`` overrides any field.
     Actual token usage is reported to the dispatching scheduler via
@@ -69,26 +82,41 @@ class PydanticAIRunner:
 
     async def run(self, *, instructions: str, result_schema: JSONSchema, content: str,
                   scope: str = None, tools: list = None, history: list = None,
-                  feedback: Sequence[Issue] = None) -> AgentResult:
+                  feedback: Sequence[Issue] = None,
+                  prompt_parts: list[str] = None,
+                  cache_blocks: int = None) -> AgentResult:
         if tools:
             raise NotImplementedError('tool-calling is deferred; see design.md §5.1')
-        free = result_schema.get('type') == 'string'  # free-text mode: lib parses
-        if free:
-            agent = Agent(self.model, output_type=str, instructions=content)
-            return await self._run_once(agent, instructions, scope, feedback, history)
-        if self.json_object:
-            agent = Agent(self.model, output_type=str, instructions=content)
-            return await self._run_json_object(agent, result_schema,
-                                               instructions, scope, feedback, history)
-        wrapped = result_schema.get('type') == 'array'
-        agent = Agent(self.model,
-                      output_type=NativeOutput(StructuredDict(_wrap(result_schema)
-                                                               if wrapped else result_schema),
-                                               strict=self.strict_output),
-                      instructions=content)
-        result = await self._raw_run(agent, _tail(instructions, scope, feedback), history)
-        data = result.output.get('items') if wrapped else result.output
-        return AgentResult(data=data, history=result.all_messages())
+        # mark only the stable prefix: system + the caller's prompt parts
+        # (or the explicit count a history round passes). A fresh
+        # specialist call must not pay a creation premium for its
+        # one-off card/scope; a history round's first user message is
+        # the stable card/scope.
+        blocks = cache_blocks if cache_blocks is not None \
+            else (_DEFAULT_CACHE_BLOCKS if history
+                  else 1 + len(prompt_parts or []))
+        token = _CACHE_BLOCKS.set(min(blocks, 4))  # the provider keeps four
+        try:
+            history = _with_parts(prompt_parts) or history
+            free = result_schema.get('type') == 'string'  # free-text mode: lib parses
+            if free:
+                agent = Agent(self.model, output_type=str, instructions=content)
+                return await self._run_once(agent, instructions, scope, feedback, history)
+            if self.json_object:
+                agent = Agent(self.model, output_type=str, instructions=content)
+                return await self._run_json_object(agent, result_schema,
+                                                   instructions, scope, feedback, history)
+            wrapped = result_schema.get('type') == 'array'
+            agent = Agent(self.model,
+                          output_type=NativeOutput(StructuredDict(_wrap(result_schema)
+                                                                   if wrapped else result_schema),
+                                                   strict=self.strict_output),
+                          instructions=content)
+            result = await self._raw_run(agent, _tail(instructions, scope, feedback), history)
+            data = result.output.get('items') if wrapped else result.output
+            return AgentResult(data=data, history=result.all_messages())
+        finally:
+            _CACHE_BLOCKS.reset(token)
 
     async def _run_json_object(self, agent, result_schema, instructions, scope,
                                feedback, history):
@@ -156,26 +184,20 @@ def _stripped_headers(headers: httpx.Headers) -> httpx.Headers:
     return headers
 
 
-def marked_request(body: dict) -> bool:
-    """Mark the first two string-content messages of a parsed
-    chat-completions body — the shared payload and the shared-prefix
-    user message — as dashscope explicit-cache blocks (``cache_control``
-    extension). Two boundaries, not one: correction and repair rounds
-    re-dispatch with the conversation appended, and only a marker
-    closed before the appended tail lets that whole prefix hit
-    (measured on dashscope: a router repair round reads ~91% cached
-    with both marked, ~40% with system alone). A shorter request never
-    matches a longer block, so the second marker costs a one-off
-    creation premium and pays on the first re-dispatch. The marker must
-    close the shared payload at a message boundary — marking
-    mid-message does not match. Returns whether the body changed;
-    shapes without a leading string-content system message pass
-    through."""
+def marked_request(body: dict, blocks: int) -> bool:
+    """Mark the first ``blocks`` string-content messages of a parsed
+    chat-completions body as dashscope explicit-cache blocks
+    (``cache_control`` extension). The boundaries are message edges,
+    not content blocks: dashscope closes a cache block only at a message
+    boundary, and a shorter request never matches a longer block. The
+    caller clamps the count to the provider's four-boundary limit.
+    Returns whether the body changed; shapes without a leading
+    string-content system message pass through."""
     messages = body.get('messages')
     if not (messages and messages[0].get('role') == 'system'
             and isinstance(messages[0].get('content'), str)):
         return False
-    for m in messages[:2]:
+    for m in messages[:blocks]:
         if isinstance(m.get('content'), str):
             m['content'] = [{'type': 'text', 'text': m['content'],
                              'cache_control': {'type': 'ephemeral'}}]
@@ -228,11 +250,11 @@ def openai_model(base_url: str, api_key: str, model: str, *, explicit_cache: boo
     """A pydantic-ai Model for any OpenAI-compatible endpoint — the
     provider mechanism lives inside the agents boundary; hosts pass
     only deployment config. Requires the ``docspectra[pydantic-ai]`` extra.
-    ``explicit_cache`` marks the first two string-content messages as
-    provider cache blocks (dashscope explicit cache): paired with a
-    runner that puts the shared payload in Agent instructions, the call
-    that runs first pays cache creation once and every call behind it
-    hits; the
+    ``explicit_cache`` marks the leading stable messages as provider
+    cache blocks (dashscope explicit cache; the runner sets the count
+    per call). Paired with a runner that puts the shared payload in
+    Agent instructions, the call that runs first pays cache creation
+    once and every call behind it hits; the
     wire transport relabels dashscope's non-standard cache-write usage
     field so the count also lands on the span. Providers that reject
     the extension must leave it off. A host ``http_client`` (proxies,
@@ -244,7 +266,8 @@ def openai_model(base_url: str, api_key: str, model: str, *, explicit_cache: boo
         raise ImportError('install the pydantic-ai extra: docspectra[pydantic-ai]') from e
     if explicit_cache:
         http_client = httpx.AsyncClient(
-            transport=_WireTransport([marked_request]))
+            transport=_WireTransport(
+                [lambda body: marked_request(body, _CACHE_BLOCKS.get())]))
     return OpenAIChatModel(model, provider=OpenAIProvider(
         base_url=base_url, api_key=api_key, http_client=http_client))
 
@@ -298,6 +321,16 @@ def _unwrap(obj, schema: JSONSchema):
     return obj
 
 
+def _with_parts(parts: list[str] | None):
+    """The stable prompt parts as user messages. They are separate
+    messages because a provider cache boundary closes only at a message
+    edge; a history round already carries them, so the caller passes
+    None."""
+    if not parts:
+        return None
+    return [ModelRequest.user_text_prompt(part) for part in parts]
+
+
 def _tail(instructions: str, scope, feedback) -> str:
     parts = [instructions] if instructions else []
     if scope is not None:
@@ -313,8 +346,8 @@ def _output_block(schema: JSONSchema) -> str:
     call's expected shape. The restatement is the only schema a call
     sees — the shared payload is the document text alone — so the
     directive pins the top level, and the partial schema rides beside
-    it (a full-document shape was measured to override the item
-    expectation entirely). A patch-or-value anyOf
+    it (a full-document shape would override the item expectation
+    entirely). A patch-or-value anyOf
     (a correction round) states the diff protocol instead — it must
     win the prompt tail or the model re-emits the full value."""
     if is_patch_round(schema):

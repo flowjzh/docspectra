@@ -169,23 +169,24 @@ async def test_two_bad_replies_yield_none_data():
     assert result.data is None
 
 
-def test_marked_request_marks_leading_system_payload():
+def test_marked_request_marks_the_requested_system_payload():
     body = {'model': 'm', 'messages': [
         {'role': 'system', 'content': 'SHARED PAYLOAD'},
         {'role': 'user', 'content': 'THE CARD'}]}
-    assert marked_request(body) is True
+    assert marked_request(body, 1) is True
     assert body['messages'][0]['content'] == [
         {'type': 'text', 'text': 'SHARED PAYLOAD',
          'cache_control': {'type': 'ephemeral'}}]
+    assert body['messages'][1]['content'] == 'THE CARD'
 
 
-def test_marked_request_marks_the_shared_prefix_user_message_too():
+def test_marked_request_marks_the_requested_message_count():
     body = {'model': 'm', 'messages': [
         {'role': 'system', 'content': 'SHARED PAYLOAD'},
         {'role': 'user', 'content': 'SEGMENTS'},
         {'role': 'assistant', 'content': '0-9 a.0'},
         {'role': 'user', 'content': 'repair feedback'}]}
-    assert marked_request(body) is True
+    assert marked_request(body, 2) is True
     messages = body['messages']
     assert [m['content'][0]['text'] for m in messages[:2]] == ['SHARED PAYLOAD', 'SEGMENTS']
     assert all(m['content'][0]['cache_control'] == {'type': 'ephemeral'} for m in messages[:2])
@@ -197,7 +198,7 @@ def test_marked_request_passes_other_shapes_through():
     for messages in ([{'role': 'user', 'content': 'hi'}],
                      [{'role': 'system', 'content': [{'type': 'text', 'text': 'already blocks'}]}]):
         body = {'model': 'm', 'messages': messages}
-        assert marked_request(body) is False
+        assert marked_request(body, 2) is False
 
 
 def test_rename_cache_write_relabels_dashscope_usage_field():
