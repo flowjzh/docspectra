@@ -1,5 +1,6 @@
 """File → text. Provider engines as optional extras (``docspectra[pdf-inspect]``,
-``docspectra[anydoc]``, ``docspectra[mineru]``), magic-byte type routing,
+``docspectra[anydoc]``, ``docspectra[bce]``, ``docspectra[paddleocr]``,
+``docspectra[mineru]``), magic-byte type routing,
 and file-level decline chains: ``DOCSPECTRA_PARSER_CONFIG`` orders each type's
 chain and a provider whose gate fires on a specific file declines, letting the
 next engine take it."""

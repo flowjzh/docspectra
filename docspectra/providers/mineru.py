@@ -19,7 +19,8 @@ import httpx
 from docspectra.parser import (ImageAsset, MAX_ASSETS, MAX_ASSET_BYTES,
                                ParseResult, provider)
 from docspectra.providers import traced
-from docspectra.providers._cloud import ResultCache, lanes, mime_for_ext, poll_until
+from docspectra.providers._cloud import (ResultCache, check_http, fetch,
+                                         mime_for_ext, poll_until, run_job)
 from docspectra.providers._markdown import flatten_tables
 
 from xtremeflow.scheduler.rate_limit import RetryException, auto_backoff
@@ -27,6 +28,7 @@ from xtremeflow.scheduler.request import RequestRateScheduler  # deep import: no
 
 BASE = 'https://mineru.net/api/v4'
 _UPLOAD_RETRIES = 3
+_AsyncClient = httpx.AsyncClient  # provider-local seam: tests patch this name
 
 
 class MineruError(Exception):
@@ -42,25 +44,29 @@ async def parse_mineru(data: bytes, *, name: str | None = None) -> ParseResult:
     if not token:
         raise MineruError('MINERU_API_TOKEN is not set')
     model = os.environ.get('MINERU_MODEL_VERSION', 'pipeline')
-    key = ResultCache.key(data, model)
-    if hit := _cache.facade(key, model_version=model, cache_hit=True):
-        return hit
-    timeout = float(os.environ.get('MINERU_TIMEOUT', '300'))
-    submit_lane, status_lane = lanes('MINERU_CONCURRENCY', 'submit:50|status:1000')
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        task = await submit_lane.start_task(_apply_url(client, token, model, name))
-        batch_id, file_url = await task
-        await _upload(client, file_url, data)
+
+    async def flow(client, submit_lane, status_lane, timeout):
+        batch_id, file_url = await (await submit_lane.start_task(
+            _apply_url(client, token, model, name)))
+        await _upload(client, file_url, data)  # outside the lanes
         zip_url = await _poll(client, token, batch_id, timeout, status_lane)
         if not zip_url:
-            raise MineruError(f'mineru batch {batch_id} finished without a result zip')
-        result_zip = await _download(client, zip_url)
-        markdown, images, skipped = _unzip(result_zip)
-    result = ParseResult(
-        text=flatten_tables(markdown), images=images,
-        meta={'model_version': model, 'batch_id': batch_id, 'skipped_assets': skipped})
-    _cache.put(key, result)
-    return result
+            raise MineruError(
+                f'mineru batch {batch_id} finished without a result zip')
+        blob = await fetch(client, zip_url,
+                           label='mineru result download',
+                           error=MineruError, text=False)
+        markdown, images, skipped = _unzip(blob)
+        return ParseResult(
+            text=flatten_tables(markdown), images=images,
+            meta={'model_version': model, 'batch_id': batch_id,
+                  'skipped_assets': skipped})
+
+    return await run_job(
+        cache=_cache, data=data, model=model, facet='model_version',
+        timeout_env='MINERU_TIMEOUT',
+        lanes_env='MINERU_CONCURRENCY', lanes_spec='submit:50|status:1000',
+        client_factory=_AsyncClient, flow=flow)
 
 
 @auto_backoff()
@@ -69,7 +75,7 @@ async def _apply_url(client: httpx.AsyncClient, token: str, model: str,
     res = await client.post(f'{BASE}/file-urls/batch', headers=_headers(token),
                             json={'files': [{'name': name or 'file', 'data_id': 'f'}],
                                   'model_version': model})
-    _check(res)
+    check_http(res, label='mineru file-urls', error=MineruError, retry_5xx=True)
     payload = res.json()
     if payload.get('code') != 0:
         raise MineruError(f'mineru file-urls failed: {payload.get("msg")}')
@@ -82,13 +88,16 @@ async def _upload(client: httpx.AsyncClient, url: str, data: bytes) -> None:
     count against mineru's submit rate."""
     for attempt in range(_UPLOAD_RETRIES):
         res = await client.put(url, content=data, timeout=120.0)
-        if res.status_code == 429 or res.status_code >= 500:
+        try:
+            check_http(res, label='mineru upload', error=MineruError,
+                       retry_5xx=True)
+            return
+        except RetryException:
+            if attempt + 1 == _UPLOAD_RETRIES:
+                raise MineruError(
+                    f'mineru upload failed after {_UPLOAD_RETRIES} '
+                    f'attempts: {res.status_code}') from None
             await asyncio.sleep(2 ** attempt)
-            continue
-        if res.status_code >= 400:
-            raise MineruError(f'mineru upload failed: {res.status_code}: {res.text[:200]}')
-        return
-    raise MineruError(f'mineru upload failed after {_UPLOAD_RETRIES} attempts: {res.status_code}')
 
 
 async def _poll(client: httpx.AsyncClient, token: str, batch_id: str,
@@ -104,18 +113,12 @@ async def _poll(client: httpx.AsyncClient, token: str, batch_id: str,
 async def _poll_once(client: httpx.AsyncClient, token: str, batch_id: str) -> dict:
     res = await client.get(f'{BASE}/extract-results/batch/{batch_id}',
                            headers=_headers(token))
-    _check(res)
+    check_http(res, label='mineru extract-results', error=MineruError,
+               retry_5xx=True)
     payload = res.json()
     if payload.get('code') != 0:
         raise MineruError(f'mineru extract-results failed: {payload.get("msg")}')
     return payload['data']['extract_result'][0]
-
-
-async def _download(client: httpx.AsyncClient, zip_url: str) -> bytes:
-    res = await client.get(zip_url, timeout=120.0)
-    if res.status_code >= 400:
-        raise MineruError(f'mineru result download failed: {res.status_code}')
-    return res.content
 
 
 def _unzip(result_zip: bytes) -> tuple[str, list[ImageAsset], int]:
@@ -140,15 +143,6 @@ def _unzip(result_zip: bytes) -> tuple[str, list[ImageAsset], int]:
     if not found:
         raise MineruError('mineru result zip has no full.md')
     return markdown, images, skipped
-
-
-def _check(res: httpx.Response) -> None:
-    if res.status_code >= 400:
-        msg = f'mineru {res.status_code}: {res.text[:200]}'
-        if res.status_code == 429 or res.status_code >= 500:
-            retry_after = res.headers.get('Retry-After')
-            raise RetryException(msg, retry_after=float(retry_after) if retry_after else None)
-        raise MineruError(msg)
 
 
 def _headers(token: str) -> dict:

@@ -29,10 +29,10 @@ import httpx
 from docspectra.parser import (ImageAsset, MAX_ASSETS, MAX_ASSET_BYTES,
                                ParseResult, provider, sniff)
 from docspectra.providers import traced
-from docspectra.providers._cloud import (ResultCache, lanes, mime_for_ext,
-                                         poll_until)
+from docspectra.providers._cloud import (ResultCache, fetch, json_body,
+                                         mime_for_ext, poll_until, run_job)
 
-from xtremeflow.scheduler.rate_limit import RetryException, auto_backoff
+from xtremeflow.scheduler.rate_limit import auto_backoff
 from xtremeflow.scheduler.request import RequestRateScheduler  # deep import: not re-exported
 
 _OCR_MODEL = 'PP-OCRv6'  # image inputs: raw ocr pipeline, geometry-ordered lines
@@ -87,17 +87,9 @@ def _options(model: str) -> dict:
 
 
 def _data(res: httpx.Response) -> dict:
-    """The response envelope's ``data`` — or a mapped error: 429s are
-    rate limits (retried upstream through auto_backoff), the rest
-    hard errors."""
-    if res.status_code == 429:
-        raise RetryException(f'paddleocr rate limited: {res.text[:200]}')
-    if res.status_code >= 400:
-        raise PaddleOcrError(f'paddleocr {res.status_code}: {res.text[:200]}')
-    try:
-        payload = res.json()
-    except ValueError:
-        raise PaddleOcrError(f'paddleocr malformed response: {res.text[:100]}')
+    """The response envelope's ``data`` — the shared HTTP ladder plus
+    this service's business code."""
+    payload = json_body(res, label='paddleocr', error=PaddleOcrError)
     if payload.get('code', 0) not in (0, None):
         msg = payload.get('msg') or payload.get('errorMsg') or payload.get('message') or ''
         raise PaddleOcrError(f'paddleocr: {msg[:250]}')
@@ -295,28 +287,28 @@ async def parse_paddleocr(data: bytes, *, name: str | None = None) -> ParseResul
     if not token:
         raise PaddleOcrError('PADDLEOCR_API_TOKEN is not set')
     model = _model_for(data)
-    key = ResultCache.key(data, model)
-    if hit := _cache.facade(key, model=model, cache_hit=True):
-        return hit
-    timeout = float(os.environ.get('PADDLEOCR_TIMEOUT', '300'))
-    submit_lane, status_lane = lanes('PADDLEOCR_CONCURRENCY', 'submit:60|status:600')
-    async with _AsyncClient(timeout=30.0) as client:
-        task = await submit_lane.start_task(_submit(client, token, model, data, name))
-        job_id = await task
+
+    async def flow(client, submit_lane, status_lane, timeout):
+        job_id = await (await submit_lane.start_task(
+            _submit(client, token, model, data, name)))
         jsonl_url = await _poll(client, token, job_id, timeout, status_lane)
-        res = await client.get(jsonl_url, timeout=120.0)
-        if res.status_code >= 400:
-            raise PaddleOcrError(f'paddleocr result download failed: {res.status_code}')
+        text = await fetch(client, jsonl_url,
+                           label='paddleocr result download',
+                           error=PaddleOcrError)
         try:
-            lines = [json.loads(line) for line in res.text.splitlines() if line.strip()]
+            lines = [json.loads(line) for line in text.splitlines() if line.strip()]
         except json.JSONDecodeError as e:
             raise PaddleOcrError(f'paddleocr result payload is malformed: {e}') from e
-        text, images, skipped = await _collect(model, lines, client)
-    parsed = ParseResult(
-        text=text, images=images,
-        meta={'model': model, 'job_id': job_id, 'skipped_assets': skipped})
-    _cache.put(key, parsed)
-    return parsed
+        body, images, skipped = await _collect(model, lines, client)
+        return ParseResult(
+            text=body, images=images,
+            meta={'model': model, 'job_id': job_id, 'skipped_assets': skipped})
+
+    return await run_job(
+        cache=_cache, data=data, model=model, facet='model',
+        timeout_env='PADDLEOCR_TIMEOUT',
+        lanes_env='PADDLEOCR_CONCURRENCY', lanes_spec='submit:60|status:600',
+        client_factory=_AsyncClient, flow=flow)
 
 
 _cache = ResultCache()

@@ -24,11 +24,12 @@ from docspectra.parser.contracts import Attempt, Declined, ParseResult
 from docspectra.parser.sniff import sniff, validate_declared
 
 # canonical order = the derived default chain: anydoc first for text-layer
-# pdfs, then paddleocr for scanned ones; mineru stays last — its extra
-# shares deps with paddleocr (httpx + xtremeflow), so install state alone
-# cannot rank them and this order is what keeps OCR on paddleocr
-_BUILTIN_MODULES = ('txt', 'pdf_inspect', 'anydoc', 'paddleocr', 'mineru')
-_BUILTIN_NAMES = {m.replace('_', '-') for m in _BUILTIN_MODULES}
+# pdfs, then bce for scanned ones; mineru stays last — the three cloud
+# extras share one dependency set (httpx + xtremeflow), so install state
+# alone cannot rank them and this order is what keeps OCR on bce.
+_BUILTIN_MODULES = ('txt', 'pdf_inspect', 'anydoc', 'bce', 'paddleocr', 'mineru')
+_BUILTIN_NAMES = tuple(m.replace('_', '-') for m in _BUILTIN_MODULES)
+_BUILTIN_RANK = {name: i for i, name in enumerate(_BUILTIN_NAMES)}
 _CONFIG_ENV = 'DOCSPECTRA_PARSER_CONFIG'
 
 
@@ -151,8 +152,12 @@ def _chain_for(doc_type: str) -> list[str]:
     if doc_type in config:
         return list(config[doc_type])
     # derived default chain: canonical order of installed providers that
-    # declared the type — extends automatically as built-ins are added
-    return [p.name for p in _providers.values() if doc_type in p.types]
+    # declared the type — extends automatically as built-ins are added.
+    # Ranked by the canonical module order, not import order: a host that
+    # imports a provider module directly must not reorder the chains
+    # (host-registered providers keep their order after the built-ins).
+    names = [p.name for p in _providers.values() if doc_type in p.types]
+    return sorted(names, key=lambda n: _BUILTIN_RANK.get(n, len(_BUILTIN_NAMES)))
 
 
 def _effective_config() -> dict:

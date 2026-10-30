@@ -9,7 +9,7 @@ import math
 import httpx
 import pytest
 
-from docspectra.parser import ParseDeclinedError, configure, parse
+from docspectra.parser import ParseDeclinedError, parse
 from docspectra.providers.paddleocr import (_drop_watermarks,
                                             _options as paddle_options,
                                             _reading_order)
@@ -112,12 +112,9 @@ class _FakeClient:
 
 
 @pytest.fixture
-def install_client(monkeypatch):
+def install_client(patch_provider_client):
     def install(fake):
-        def factory(**kw):
-            return fake
-        monkeypatch.setattr('docspectra.providers.paddleocr._AsyncClient',
-                            factory)
+        patch_provider_client('paddleocr', fake)
     return install
 
 
@@ -135,10 +132,8 @@ def env(monkeypatch):
 
 
 @pytest.fixture
-def paddle_chain():
-    configure({'pdf': ['paddleocr'], 'png': ['paddleocr']})
-    yield
-    configure(None)
+def paddle_chain(pin_chain):
+    pin_chain({'pdf': ['paddleocr'], 'png': ['paddleocr']})
 
 
 async def test_submit_poll_wait_flow(env, install_client, paddle_chain):

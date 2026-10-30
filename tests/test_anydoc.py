@@ -6,7 +6,7 @@ from pathlib import Path
 import anydoc
 import pytest
 
-from docspectra.parser import ParseDeclinedError, configure, parse
+from docspectra.parser import ParseDeclinedError, parse
 from tests.docx_builder import make_docx
 from tests.pdf_builder import make_pdf, raster_pdf, sample_line, strip_pdf
 
@@ -19,10 +19,8 @@ STRIP = strip_pdf()
 FIXTURES = Path(__file__).parent / 'fixtures'
 
 @pytest.fixture
-def anydoc_chain():
-    configure({'docx': ['anydoc'], 'doc': ['anydoc'], 'pdf': ['anydoc']})
-    yield
-    configure(None)
+def anydoc_chain(pin_chain):
+    pin_chain({'docx': ['anydoc'], 'doc': ['anydoc'], 'pdf': ['anydoc']})
 
 
 async def test_text_box_table_and_body_present(anydoc_chain):

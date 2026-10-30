@@ -7,7 +7,7 @@ import zipfile
 import httpx
 import pytest
 
-from docspectra.parser import ParseDeclinedError, configure, parse
+from docspectra.parser import ParseDeclinedError, parse
 from tests.helpers import PDF, PNG
 from xtremeflow.scheduler.request import RequestRateScheduler
 
@@ -76,19 +76,16 @@ def env(monkeypatch):
 
 
 @pytest.fixture
-def patch_client(monkeypatch):
+def patch_client(patch_provider_client):
     def patch(handler):
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-        monkeypatch.setattr(httpx, 'AsyncClient', lambda **kw: client)
-
+        patch_provider_client('mineru', client)
     return patch
 
 
 @pytest.fixture
-def mineru_chain():
-    configure({'pdf': ['mineru']})
-    yield
-    configure(None)
+def mineru_chain(pin_chain):
+    pin_chain({'pdf': ['mineru']})
 
 
 async def test_upload_poll_zip_flow(env, patch_client, mineru_chain):

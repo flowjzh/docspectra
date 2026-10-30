@@ -6,7 +6,7 @@ eval."""
 
 import pytest
 
-from docspectra.parser import ParseDeclinedError, configure, parse
+from docspectra.parser import ParseDeclinedError, parse
 from docspectra.providers.pdfscan import clean, ratio_hit, strip_hit
 from tests.pdf_builder import make_pdf, raster_pdf, reader, sample_line, strip_pdf
 
@@ -19,10 +19,8 @@ RATIO = make_pdf(text_lines=1, path_ops=400)
 
 
 @pytest.fixture
-def pdf_chain():
-    configure({'pdf': ['pdf-inspect']})
-    yield
-    configure(None)
+def pdf_chain(pin_chain):
+    pin_chain({'pdf': ['pdf-inspect']})
 
 
 async def test_clean_text_pdf_parses(pdf_chain):

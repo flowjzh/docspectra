@@ -1,5 +1,6 @@
 """Shared plumbing behind the cloud engines — the byte-budget result
-LRU, the dual rate lanes, and the job-poll state machine their flows
+LRU, the dual rate lanes, the HTTP outcome ladder, the result
+download, the job-poll state machine and the job lifecycle their flows
 share. Local engines share ``pdfscan``; cloud ones share this.
 Mirroring an engine's flow is fine; copying this file is not."""
 
@@ -12,8 +13,11 @@ import os
 import time
 from collections import OrderedDict
 
+import httpx
+
 from docspectra.parser import ParseResult
 
+from xtremeflow.scheduler.rate_limit import RetryException
 from xtremeflow.scheduler.request import RequestRateScheduler  # deep import: not re-exported
 
 MIME_BY_EXT = {'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png',
@@ -23,6 +27,48 @@ MIME_BY_EXT = {'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png',
 
 def mime_for_ext(ext: str) -> str:
     return MIME_BY_EXT.get(ext.lower(), 'application/octet-stream')
+
+
+def check_http(res: httpx.Response, *, label: str, error,
+               retry_5xx: bool = False) -> None:
+    """The shared outcome ladder: 429 (and 5xx for services that use
+    it as backpressure) is a retry, every other >=400 a hard error.
+    ``error`` builds that engine's exception; ``Retry-After`` rides the
+    retry when the service sends one."""
+    if res.status_code < 400:
+        return
+    msg = f'{label} {res.status_code}: {res.text[:200]}'
+    if res.status_code == 429 or (retry_5xx and res.status_code >= 500):
+        retry_after = res.headers.get('Retry-After')
+        raise RetryException(
+            msg, retry_after=float(retry_after) if retry_after else None)
+    raise error(msg)
+
+
+def json_body(res: httpx.Response, *, label: str, error) -> dict:
+    """The checked JSON body: ``check_http`` plus a malformed-body
+    error. Envelope-level error codes stay with the engine — their
+    field names and retry codes are the product's own."""
+    check_http(res, label=label, error=error)
+    try:
+        return res.json()
+    except ValueError:
+        raise error(f'{label} malformed response: {res.text[:100]}')
+
+
+async def fetch(client: httpx.AsyncClient, url: str, *, label: str, error,
+                text: bool = True):
+    """One result download (markdown, jsonl or zip) behind the shared
+    status ladder — ``text`` picks ``res.text`` over ``res.content``.
+    A result URL is fetched outside any retry wrapper, so a 429 here
+    surfaces as the engine's hard error instead of a retry signal
+    nothing can act on."""
+    res = await client.get(url, timeout=120.0)
+    try:
+        check_http(res, label=label, error=error)
+    except RetryException as e:
+        raise error(str(e)) from e
+    return res.text if text else res.content
 
 
 @functools.cache
@@ -62,6 +108,26 @@ async def poll_until(status_lane: RequestRateScheduler, once, *, timeout: float,
         if time.monotonic() >= deadline:
             raise error(f'{label} timed out after {timeout:.0f}s (state {state})')
         await asyncio.sleep(interval)
+
+
+async def run_job(*, cache, data: bytes, model: str, facet: str,
+                  timeout_env: str, lanes_env: str, lanes_spec: str,
+                  client_factory, flow) -> ParseResult:
+    """The invariant part of one cloud job: the LRU facade (keyed by
+    content and model), the timeout env, the dual lanes, one client, and
+    the cache write. ``flow(client, submit_lane, status_lane, timeout)``
+    runs the engine's own submit → poll → collect and returns the
+    ParseResult — keeping the lane calls in the flow is what lets an
+    engine step outside the lanes (mineru's S3 upload)."""
+    key = ResultCache.key(data, model)
+    if hit := cache.facade(key, **{facet: model}, cache_hit=True):
+        return hit
+    timeout = float(os.environ.get(timeout_env, '300'))
+    submit_lane, status_lane = lanes(lanes_env, lanes_spec)
+    async with client_factory(timeout=30.0) as client:
+        result = await flow(client, submit_lane, status_lane, timeout)
+    cache.put(key, result)
+    return result
 
 
 class ResultCache:

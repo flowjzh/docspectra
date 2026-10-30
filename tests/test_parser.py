@@ -128,12 +128,12 @@ async def test_derived_default_chain_in_registration_order(fakes):
     assert result.provider == 'fake-c'
 
 
-async def test_builtin_pdf_chain_ranks_paddleocr_before_mineru(fakes):
-    """Both extras share deps, so import success can't rank them — the
-    builtin order must keep paddleocr ahead of mineru or a paddleocr-only
-    install silently routes scanned pdfs to mineru."""
+async def test_builtin_pdf_chain_ranks_the_cloud_tiers(fakes):
+    """The cloud extras share one dependency set, so import success
+    can't rank them — the tuple order must keep bce ahead of paddleocr
+    (the pdf tier) and both ahead of mineru (the trailing fallback)."""
     chain = _chain_for('pdf')
-    assert chain.index('paddleocr') < chain.index('mineru')
+    assert chain.index('bce') < chain.index('paddleocr') < chain.index('mineru')
 
 
 async def test_zip_routes_docx_xlsx_pptx(fakes):
