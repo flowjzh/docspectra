@@ -14,6 +14,7 @@ from tests.helpers import PDF
 
 OAUTH_URL = 'https://aip.baidubce.com/oauth/2.0/token'
 MARKDOWN_URL = 'https://result.local/doc.md'
+STRUCTURED_URL = 'https://result.local/doc.json'
 MARKDOWN = '# Test Candidate\n\n2021/03~ Present Director- Supply Chain'
 TASK_URL = ('https://aip.baidubce.com/rest/2.0/brain/online/v2/'
             'unlimited-ocr-parser/task')
@@ -21,20 +22,33 @@ PADDLE_VL_URL = ('https://aip.baidubce.com/rest/2.0/brain/online/v2/'
                  'paddle-vl-parser/task')
 
 
+def _structured(*pages: tuple) -> dict:
+    """A structured-result payload from page layout lists — each
+    argument is one page's ``(type, text)`` layout pairs."""
+    return {'pages': [{'layouts': [
+        {'type': t, 'text': x} for t, x in page]} for page in pages]}
+
+
 class _FakeClient:
     """Scripted httpx.AsyncClient: one token GET, submits recorded,
-    task states popped in order, then the markdown body. Signatures
-    mirror the provider's calls, so a renamed kwarg fails loudly."""
+    task states popped in order, then the markdown body (and the
+    structured payload when one is installed). Signatures mirror the
+    provider's calls, so a renamed kwarg fails loudly."""
 
     def __init__(self, markdown: str | None = MARKDOWN,
                  states: tuple = ('running', 'success'),
                  fail_submit: int | dict | None = None,
-                 auth: dict | None = None):
+                 auth: dict | None = None,
+                 structured: dict | str | None = None,
+                 fail_structured: bool = False):
         self.markdown = markdown
         self.states = list(states)
         self.fail_submit = fail_submit
         self.auth = auth or {'access_token': 'tok-1', 'expires_in': 2592000}
+        self.structured = structured
+        self.fail_structured = fail_structured
         self.submits = []  # post kwargs per task call
+        self.downloads = []  # result urls fetched, in order
         self.token_gets = 0
 
     async def __aenter__(self):
@@ -48,7 +62,15 @@ class _FakeClient:
             self.token_gets += 1
             return httpx.Response(200, json=self.auth)
         if url == MARKDOWN_URL:
+            self.downloads.append(url)
             return httpx.Response(200, text=self.markdown)
+        if url == STRUCTURED_URL:
+            self.downloads.append(url)
+            if self.fail_structured:
+                return httpx.Response(404, text='gone')
+            if isinstance(self.structured, str):
+                return httpx.Response(200, text=self.structured)
+            return httpx.Response(200, json=self.structured)
         raise AssertionError(f'unexpected GET {url}')
 
     async def post(self, url, *, params=None, headers=None, data=None,
@@ -61,6 +83,8 @@ class _FakeClient:
                 body['task_error'] = 'parse failed'
             if state == 'success' and self.markdown is not None:
                 body['markdown_url'] = MARKDOWN_URL
+                if self.structured is not None:
+                    body['parse_result_url'] = STRUCTURED_URL
             return httpx.Response(200, json={
                 'error_code': 0, 'error_msg': 'success',
                 'result': body})
@@ -85,6 +109,7 @@ def env(monkeypatch):
     monkeypatch.setenv('BCE_SECRET_KEY', 'secret-1')
     monkeypatch.delenv('BCE_MODEL', raising=False)
     monkeypatch.delenv('BCE_TIMEOUT', raising=False)
+    monkeypatch.delenv('BCE_INCLUDE_HEADER', raising=False)
     from docspectra.providers import bce
     bce._cache.clear()
     bce._token = None
@@ -215,3 +240,99 @@ async def test_missing_credentials_are_a_hard_error(env, bce_chain,
     with pytest.raises(ParseDeclinedError) as exc:
         await parse(PDF, name='resume.pdf')
     assert 'BCE_API_KEY' in str(exc.value.__cause__)
+
+
+async def test_header_layouts_are_prepended_by_default(env, install_client,
+                                                       bce_chain):
+    # an identity block filed under header never reaches the markdown
+    install_client(_FakeClient(structured=_structured(
+        (('header', 'Header Candidate\nEmail: hc@example.com'),
+         ('title', 'SUMMARY')),
+        (('title', 'EXPERIENCE'),),
+    )))
+    result = await parse(PDF, name='resume.pdf')
+    assert result.text == ('Header Candidate\nEmail: hc@example.com'
+                           f'\n\n{MARKDOWN}')
+
+
+async def test_no_repeat_collapses_a_running_header(env, install_client,
+                                                    bce_chain):
+    install_client(_FakeClient(structured=_structured(
+        (('header', 'Internal Use Only'), ('title', 'SUMMARY')),
+        (('header', 'Internal Use Only'), ('title', 'MORE')),
+        (('header', 'Internal Use Only'),),
+    )))
+    result = await parse(PDF, name='resume.pdf')
+    assert result.text == f'Internal Use Only\n\n{MARKDOWN}'
+
+
+async def test_no_repeat_keeps_nonconsecutive_headers(env, install_client,
+                                                      bce_chain):
+    install_client(_FakeClient(structured=_structured(
+        (('header', 'Chapter One'),),
+        (('title', 'BODY'),),
+        (('header', 'Chapter One'),),
+    )))
+    result = await parse(PDF, name='resume.pdf')
+    assert result.text == f'Chapter One\n\nChapter One\n\n{MARKDOWN}'
+
+
+async def test_all_keeps_every_occurrence(env, install_client, bce_chain,
+                                          monkeypatch):
+    monkeypatch.setenv('BCE_INCLUDE_HEADER', 'all')
+    install_client(_FakeClient(structured=_structured(
+        (('header', 'Internal Use Only'),),
+        (('header', 'Internal Use Only'),),
+    )))
+    result = await parse(PDF, name='resume.pdf')
+    assert result.text == ('Internal Use Only\n\nInternal Use Only'
+                           f'\n\n{MARKDOWN}')
+
+
+async def test_none_never_downloads_the_structured_result(
+        env, install_client, bce_chain, monkeypatch):
+    monkeypatch.setenv('BCE_INCLUDE_HEADER', 'none')
+    fake = _FakeClient(structured=_structured(
+        (('header', 'Header Candidate'),)))
+    install_client(fake)
+    result = await parse(PDF, name='resume.pdf')
+    assert result.text == MARKDOWN
+    assert fake.downloads == [MARKDOWN_URL]
+    assert result.meta['model'] == 'unlimited-ocr-parser:none'
+
+
+async def test_structured_download_failure_degrades_to_markdown(
+        env, install_client, bce_chain):
+    install_client(_FakeClient(structured={}, fail_structured=True))
+    result = await parse(PDF, name='resume.pdf')
+    assert result.text == MARKDOWN
+
+
+async def test_malformed_structured_payload_degrades_to_markdown(
+        env, install_client, bce_chain):
+    install_client(_FakeClient(structured='not json'))
+    result = await parse(PDF, name='resume.pdf')
+    assert result.text == MARKDOWN
+
+
+async def test_unknown_header_mode_is_a_hard_error(env, install_client,
+                                                   bce_chain, monkeypatch):
+    monkeypatch.setenv('BCE_INCLUDE_HEADER', 'some')
+    install_client(_FakeClient())
+    with pytest.raises(ParseDeclinedError) as exc:
+        await parse(PDF, name='resume.pdf')
+    assert 'is not a mode' in str(exc.value.__cause__)
+
+
+async def test_a_mode_flip_does_not_serve_the_cached_other_mode(
+        env, install_client, bce_chain, monkeypatch):
+    fake = _FakeClient(structured=_structured(
+        (('header', 'Header Candidate'),)))
+    install_client(fake)
+    first = await parse(PDF, name='resume.pdf')
+    assert first.text == f'Header Candidate\n\n{MARKDOWN}'
+    monkeypatch.setenv('BCE_INCLUDE_HEADER', 'none')
+    second = await parse(PDF, name='resume.pdf')
+    assert second.text == MARKDOWN  # fresh key, not first's cached text
+    assert len(fake.submits) == 2  # the flip went to the wire
+    assert 'cache_hit' not in second.meta

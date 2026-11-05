@@ -11,6 +11,11 @@ their rationale live in ``_options``; token/lanes/poll plumbing is
 shared (``_cloud``); rate rejections and HTTP 429 retry through
 auto_backoff, everything else surfaces as a hard error.
 
+The markdown serializer drops header-classified layouts — the layout
+model files a resume's identity block (name, contact) under ``header``
+— so ``BCE_INCLUDE_HEADER`` (``no-repeat`` default, ``all``, ``none``)
+governs re-injecting them from the task's structured result.
+
 The declared types are the service's documented input families mapped
 onto docspectra's canonical types. A deployment that wants bce off a
 family pins that type's chain through ``DOCSPECTRA_PARSER_CONFIG``."""
@@ -19,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import os
 import time
 from urllib.parse import urlencode
@@ -49,6 +55,9 @@ _AsyncClient = httpx.AsyncClient  # provider-local seam: tests patch this name
 # transient rate rejections worth retrying: the openapi QPS code and the
 # account's per-app concurrency ceiling
 _RETRY_CODES = frozenset({18, 282118})
+
+_HEADER_DEFAULT = 'no-repeat'
+_HEADER_MODES = frozenset({'no-repeat', 'all', 'none'})
 
 
 class BceError(Exception):
@@ -146,7 +155,8 @@ async def _poll(client: httpx.AsyncClient, token: str, model: str,
                 task_id: str, timeout: float,
                 status_lane: RequestRateScheduler) -> dict:
     """Drive the task to success on the status lane; the done check's
-    payload is the result envelope (markdown_url, cost_page_num)."""
+    payload is the result envelope (markdown_url, parse_result_url,
+    cost_page_num)."""
     async def once():
         data = await _status(client, token, model, task_id)
         state = data.get('status')
@@ -159,19 +169,62 @@ async def _poll(client: httpx.AsyncClient, token: str, model: str,
                             label='bce', error=BceError)
 
 
-async def _collect(client: httpx.AsyncClient, result: dict, model: str,
-                   task_id: str) -> ParseResult:
+def _recovered_headers(payload: str, keep_repeats: bool) -> list[str]:
+    """Header-layout texts the markdown dropped, one block per page in
+    page order. A page whose block repeats the previous page's verbatim
+    is dropped (the running-header shape — a repeat after a headerless
+    page stays) unless ``keep_repeats`` keeps every block. A malformed
+    structured payload reads as no headers."""
+    try:
+        pages = (json.loads(payload) or {}).get('pages') or []
+    except ValueError:
+        return []
+    kept: list[str] = []
+    prev = None
+    for page in pages:
+        texts = [(layout.get('text') or '').strip()
+                 for layout in (page.get('layouts') or [])
+                 if layout.get('type') == 'header']
+        block = '\n'.join(t for t in texts if t)
+        if block and (keep_repeats or block != prev):
+            kept.append(block)
+        prev = block
+    return kept
+
+
+async def _collect(client: httpx.AsyncClient, result: dict, label: str,
+                   task_id: str, include: str) -> ParseResult:
     """The whole-document markdown — the parser's text contract; the
     products' structured result (pages/tables/cells) has no consumer in
-    the text pipeline, so only the markdown url is fetched."""
+    the text pipeline beyond the one exception here: the markdown
+    serializer drops header-classified layouts, so unless the knob says
+    ``none`` the header texts are re-injected from the structured
+    payload, prepended in page order. Recovery is best-effort — a
+    missing url, a failed download, or a malformed payload degrades to
+    the markdown as-is rather than failing the parse."""
     url = result.get('markdown_url') or ''
     if not url:
         raise BceError('bce task succeeded without a markdown url')
-    text = await fetch(client, url, label='bce markdown download',
-                       error=BceError)
+    surl = (result.get('parse_result_url') or '') if include != 'none' else ''
+
+    async def best_effort() -> str:
+        if not surl:
+            return ''
+        try:
+            return await fetch(client, surl,
+                               label='bce structured download',
+                               error=BceError)
+        except BceError:
+            return ''
+
+    text, payload = await asyncio.gather(
+        fetch(client, url, label='bce markdown download', error=BceError),
+        best_effort())
+    headers = _recovered_headers(payload, include == 'all')
     return ParseResult(
-        text=text, images=[],
-        meta={'model': model, 'job_id': task_id,
+        text='\n\n'.join([*headers, text]),
+        images=[],
+        meta={'model': label, 'job_id': task_id,
               'pages': int(result.get('cost_page_num') or 0)})
 
 
@@ -188,6 +241,14 @@ async def parse_bce(data: bytes, *, name: str | None = None) -> ParseResult:
     if model not in _PRODUCTS:
         raise BceError(f'BCE_MODEL {model!r} is not a known product: '
                        f'{sorted(_PRODUCTS)}')
+    include = os.environ.get('BCE_INCLUDE_HEADER', _HEADER_DEFAULT)
+    if include not in _HEADER_MODES:
+        raise BceError(f'BCE_INCLUDE_HEADER {include!r} is not a mode: '
+                       f'{sorted(_HEADER_MODES)}')
+    # the mode rides the cache key and the meta model label — a mode
+    # flip must not serve the other mode's text out of the LRU; the
+    # default spells to the bare product, so today's labels stand
+    keyed = model if include == _HEADER_DEFAULT else f'{model}:{include}'
 
     async def flow(client, submit_lane, status_lane, timeout):
         # the token fetch and the body encode are independent; both stay
@@ -199,10 +260,10 @@ async def parse_bce(data: bytes, *, name: str | None = None) -> ParseResult:
             _submit(client, token, model, body)))
         result = await _poll(client, token, model, task_id, timeout,
                              status_lane)
-        return await _collect(client, result, model, task_id)
+        return await _collect(client, result, keyed, task_id, include)
 
     return await run_job(
-        cache=_cache, data=data, model=model, facet='model',
+        cache=_cache, data=data, model=keyed, facet='model',
         timeout_env='BCE_TIMEOUT',
         # the service caps both endpoints at 2 QPS (submit and result
         # query); one lane each, exactly at the ceiling — the retry
