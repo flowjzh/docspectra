@@ -5,7 +5,7 @@ from functools import wraps
 
 from opentelemetry.trace import get_tracer
 
-from docspectra.parser import Declined, ParseResult
+from docspectra.parser import Declined, ParseResult, exc_reason
 
 # shared by the provider engines; spans are no-ops until a host
 # registers a tracer provider
@@ -16,18 +16,26 @@ def traced(fn):
     """One span per parse call, named after the engine module — engine
     registrations and their span names can then never drift apart. The
     span carries the outcome bookkeeping (outcome, decline reason,
-    input bytes, the meta diagnostics — never text: spans are an
-    account ledger like the sidecar, PII stays out; meta keys ending
-    in ``_id`` stay off too — by convention they point at remote state
-    holding the file, and the convention keeps new engines covered)."""
+    error reason, input bytes, the meta diagnostics — never text:
+    spans are an account ledger like the sidecar, PII stays out; meta
+    keys ending in ``_id`` stay off too — by convention they point at
+    remote state holding the file, and the convention keeps new
+    engines covered)."""
     span_name = f'{fn.__module__.rsplit(".", 1)[-1]}.parse'
 
     @wraps(fn)
     async def wrapper(*args, **kwargs):
         with tracer.start_as_current_span(span_name) as span:
-            result = await fn(*args, **kwargs)
             if args and isinstance(args[0], (bytes, bytearray)):
                 span.set_attribute('parse.bytes', len(args[0]))
+            try:
+                result = await fn(*args, **kwargs)
+            except Exception as e:
+                # the engine exception itself stays on the span's event;
+                # the attribute mirrors it where the ledger reads
+                span.set_attribute('parse.outcome', 'error')
+                span.set_attribute('parse.reason', exc_reason(e)[:250])
+                raise
             if isinstance(result, Declined):
                 span.set_attribute('parse.outcome', 'declined')
                 span.set_attribute('parse.reason', result.reason)

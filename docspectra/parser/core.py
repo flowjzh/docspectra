@@ -68,6 +68,12 @@ def _norm(name: str) -> str:
     return name.replace('_', '-')
 
 
+def exc_reason(e: BaseException) -> str:
+    """One failure-reason format for every sink that records a provider
+    exception — import errors, chain attempts, span reasons."""
+    return f'{type(e).__name__}: {e}'
+
+
 def register(name: str, types: Sequence[str], fn) -> None:
     """Programmatic registration, same surface as the decorator. Names are
     normalized (hyphen↔underscore) and registration is last-write-wins."""
@@ -96,7 +102,7 @@ def ensure_builtins() -> None:
         except ImportError as e:
             if not isinstance(e, ModuleNotFoundError) \
                     or (e.name or '').startswith('docspectra'):
-                _import_errors[_norm(module)] = f'{type(e).__name__}: {e}'
+                _import_errors[_norm(module)] = exc_reason(e)
 
 
 def configure(config: dict | None = None) -> None:
@@ -129,7 +135,7 @@ async def parse(data: bytes, *, name: str | None = None) -> ParseResult:
         try:
             result = await p.parse(data, name=name)
         except Exception as e:
-            attempts.append(Attempt(p.name, 'error', f'{type(e).__name__}: {e}'))
+            attempts.append(Attempt(p.name, 'error', exc_reason(e)))
             cause = cause or e
             continue
         if isinstance(result, Declined):

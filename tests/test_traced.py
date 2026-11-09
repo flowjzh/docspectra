@@ -1,6 +1,6 @@
 """The traced provider decorator's span bookkeeping: outcome, decline
-reason, input bytes, and the meta diagnostics — never text (spans are
-an account ledger like the sidecar, PII stays out)."""
+reason, error reason, input bytes, and the meta diagnostics — never
+text (spans are an account ledger like the sidecar, PII stays out)."""
 
 import pytest
 
@@ -51,6 +51,22 @@ async def test_declined_records_outcome_and_reason(spans):
     assert span.attributes == {'parse.bytes': 3,
                                'parse.outcome': 'declined',
                                'parse.reason': 'table_wall_gate'}
+
+
+async def test_error_records_outcome_and_reason(spans):
+    @traced
+    async def parse(data, *, name=None):
+        raise ValueError('extract failed: parse document task failed')
+
+    with pytest.raises(ValueError):
+        await parse(b'pdf')
+    # the exception rides the span as an event too — the attributes
+    # mirror it where the account ledger reads
+    assert spans[0].attributes == {'parse.bytes': 3,
+                                   'parse.outcome': 'error',
+                                   'parse.reason': 'ValueError: extract '
+                                                   'failed: parse document '
+                                                   'task failed'}
 
 
 async def test_success_records_sizes_never_text(spans):
